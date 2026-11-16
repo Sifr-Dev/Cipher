@@ -28,7 +28,10 @@ Roadmap continues below.
 | `src/render.zig` | CPU rasterizer for the SIFR ring; A8R8G8B8 pixels, PPM evidence dump |
 | `src/vulkan_probe.zig` | Headless Vulkan probe, NVIDIA ICD (`zig build probe`) — PROBE_OK |
 | `src/font.zig` | From-zero SFNT reader: table directory, `head`/`maxp`/`hhea`/`hmtx`, `loca`, `cmap` (formats 4/12), glyph bounds — verified on bundled Instrument Sans and Geist Mono (SIL OFL 1.1; licenses in `assets/`) |
-| `src/outline.zig` | From-zero `glyf` reader: simple + composite outlines with 2×2/scale/xy-scale matrices and point-matching arguments |
+| `src/atlas.zig` | Printable-ASCII R8 glyph atlas (10x10 grid, 48px cells) built by our own rasterizer; `atlasdump.zig` dumps it as PPM evidence |
+| `src/rasterize.zig` | Adaptive quadratic-Bezier flattening + 4x4-supersampled scanline non-zero-winding fill |
+| `src/outline.zig` | From-zero `glyf` reader: simple + composite outlines (2x2/xy/scale matrices, point-matching args) |
+| `src/text.comp` | Text-composite compute shader: samples the atlas r8 storage image, alpha-blends over the GPU-drawn frame in place |
 | `assets/` | Instrument Sans + Geist Mono, decompressed from the OFL-licensed fontsource variable fonts (`.ttf` committed; licenses included) |
 | `src/main.zig` | App lifecycle: connect → bind → seat/keyboard/pointer → configure → render/commit/frame-callback loop |
 
@@ -60,6 +63,7 @@ No generated protocol bindings, no external crates/packages, no FFI to a toolkit
 - [x] Input: `wl_seat`/`wl_keyboard`/`wl_pointer` — focus, key handling, clean quit (verified live)
 - [x] Headless Vulkan probe against the NVIDIA ICD — device, queue, image, host-visible buffer (verified, 2026-11-16, `PROBE_OK`)
 - [x] GPU-drawn SIFR ring (compute shader) → host-visible memory → wl_shm present
+- [x] GPU-composited text (glyph atlas sampled by text.comp, brass `SIFR` caption verified on-frame)
 - [ ] Scene graph, render graph, batching
 - [ ] Text (own TrueType reader, glyph atlas), flexbox layout, motion
 - [ ] `mobilis` terminal and `harmonis` music player built on Cipher
