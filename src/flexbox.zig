@@ -72,34 +72,47 @@ pub fn compute(
     const inner_cross = if (is_row) inner.height else inner.width;
 
     // Sum of fixed main sizes and gaps.
-    var fixed_main: f64 = options.gap * @as(f64, @floatFromInt(n - 1));
     var total_grow: f64 = 0;
-    for (items) |item| {
-        fixed_main += mainSize(item, options.direction);
-        total_grow += item.grow;
-    }
+    for (items) |item| total_grow += item.grow;
+
+    // First pass: final main sizes, grow distribution before justification.
+    var fixed_main: f64 = options.gap * @as(f64, @floatFromInt(n - 1));
+    for (items) |item| fixed_main += mainSize(item, options.direction);
     var remaining = inner_main - fixed_main;
     if (remaining < 0) remaining = 0;
 
-    // Main-axis starting offset by justification.
+    var total_final: f64 = 0;
+    for (items, 0..) |item, i| {
+        var main = mainSize(item, options.direction);
+        if (item.grow > 0 and total_grow > 0) {
+            main += (remaining * item.grow) / total_grow;
+        }
+        rects[i] = if (is_row)
+            .{ .x = 0, .y = 0, .width = main, .height = 0 }
+        else
+            .{ .x = 0, .y = 0, .width = 0, .height = main };
+        total_final += main;
+    }
+
+    // Slack left after grow consumption goes to justification.
+    var slack = inner_main - total_final - options.gap * @as(f64, @floatFromInt(n - 1));
+    if (slack < 0) slack = 0;
+
     var start_offset: f64 = 0;
     var gap = options.gap;
     switch (options.justify) {
         .start => {},
-        .center => start_offset = remaining / 2.0,
-        .end => start_offset = remaining,
+        .center => start_offset = slack / 2.0,
+        .end => start_offset = slack,
         .space_between => {
-            if (n > 1) gap = options.gap + remaining / @as(f64, @floatFromInt(n - 1));
+            if (n > 1) gap = options.gap + slack / @as(f64, @floatFromInt(n - 1));
         },
     }
 
     var cursor: f64 = if (is_row) inner.x + start_offset else inner.y + start_offset;
 
     for (items, 0..) |item, i| {
-        var main = mainSize(item, options.direction);
-        if (item.grow > 0 and total_grow > 0) {
-            main += (remaining * item.grow) / total_grow;
-        }
+        const main = if (is_row) rects[i].width else rects[i].height;
         const cross = if (crossSize(item) > 0) crossSize(item) else inner_cross;
 
         if (is_row) {

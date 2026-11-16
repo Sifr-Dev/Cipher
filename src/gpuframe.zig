@@ -14,6 +14,7 @@ const geometry = @import("geometry.zig");
 const font_mod = @import("font.zig");
 const atlas_mod = @import("atlas.zig");
 const textlayout_mod = @import("textlayout.zig");
+const ui_mod = @import("ui.zig");
 const Instance = atlas_mod.Instance;
 
 const WIDTH = 640;
@@ -599,9 +600,16 @@ const State = struct {
     glyph_buffer: VkBuffer = undefined,
     glyph_memory: VkDeviceMemory = undefined,
     glyph_mapped: ?[*]Instance = null,
+    rects_buffer: VkBuffer = undefined,
+    rects_memory: VkDeviceMemory = undefined,
+    rects_mapped: ?[*]ui_mod.RectCmd = null,
+    ui_descriptor_set: VkDescriptorSet = undefined,
+    ui_pipeline: VkPipeline = undefined,
+    ui_pipeline_layout: VkPipelineLayout = undefined,
+    ui_descriptor_pool: VkDescriptorPool = undefined,
     font_bytes: []const u8 = &.{},
     font_parsed: font_mod.Font = undefined,
-    caption_split: u32 = 0,
+    calibrated: bool = false,
 
     fn destroy(self: *State) void {
         _ = self.vk.vkDestroyDevice(self.device, null);
@@ -810,13 +818,9 @@ const ring_spv_bytes = @embedFile("ring.spv");
 const const_spv_bytes = @embedFile("const.spv");
 const one_spv_bytes = @embedFile("one.spv");
 const text_spv_bytes = @embedFile("text.spv");
+const ui_spv_bytes = @embedFile("ui.spv");
 
 const TextPush = extern struct {
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32,
-    first_glyph: u32,
     count: u32,
     frame_width: u32,
     frame_height: u32,
@@ -1059,7 +1063,7 @@ fn createAtlasAndText(state: *State) !void {
     if (state.vk.vkQueueWaitIdle(state.queue) != VK_SUCCESS) return error.AtlasUploadWaitIdleFailed;
 
     // Glyph instance SSBO: 16 slots of 16-byte Instance, persistently mapped.
-    const glyph_buffer_size: u64 = 32 * @sizeOf(Instance);
+    const glyph_buffer_size: u64 = 96 * @sizeOf(Instance);
     const glyph_info = VkBufferCreateInfo{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = null,
@@ -1098,6 +1102,63 @@ fn createAtlasAndText(state: *State) !void {
         return error.MapGlyphMemoryFailed;
     }
     state.glyph_mapped = @ptrCast(@alignCast(glyph_mapped));
+
+    // Rect SSBO for the UI pass: 64 draw records of 64 bytes, persistently mapped.
+    const rects_buffer_size: u64 = 64 * @sizeOf(ui_mod.RectCmd);
+    const rects_info = VkBufferCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .size = rects_buffer_size,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = null,
+    };
+    var rects_buffer: VkBuffer = undefined;
+    if (state.vk.vkCreateBuffer(state.device, &rects_info, null, &rects_buffer) != VK_SUCCESS) {
+        return error.CreateRectsBufferFailed;
+    }
+    state.rects_buffer = rects_buffer;
+
+    var rects_reqs: VkMemoryRequirements = undefined;
+    state.vk.vkGetBufferMemoryRequirements(state.device, rects_buffer, &rects_reqs);
+    const rects_mem_type = findMemoryType(&mem_props, rects_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) orelse return error.NoRectsMemory;
+    const rects_alloc = VkMemoryAllocateInfo{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = null,
+        .allocationSize = rects_reqs.size,
+        .memoryTypeIndex = rects_mem_type,
+    };
+    var rects_memory: VkDeviceMemory = undefined;
+    if (state.vk.vkAllocateMemory(state.device, &rects_alloc, null, &rects_memory) != VK_SUCCESS) {
+        return error.AllocateRectsMemoryFailed;
+    }
+    state.rects_memory = rects_memory;
+    if (state.vk.vkBindBufferMemory(state.device, rects_buffer, rects_memory, 0) != VK_SUCCESS) {
+        return error.BindRectsMemoryFailed;
+    }
+    var rects_mapped: ?*anyopaque = null;
+    if (state.vk.vkMapMemory(state.device, rects_memory, 0, rects_buffer_size, 0, &rects_mapped) != VK_SUCCESS) {
+        return error.MapRectsMemoryFailed;
+    }
+    state.rects_mapped = @ptrCast(@alignCast(rects_mapped));
+}
+
+fn zeroUnusedTail(mapped: ?[*]Instance, count: usize, capacity: usize) void {
+    const dest = mapped orelse return;
+    var i = count;
+    while (i < capacity) : (i += 1) {
+        dest[i] = std.mem.zeroes(Instance);
+    }
+}
+
+fn zeroUnusedRects(mapped: ?[*]ui_mod.RectCmd, count: usize, capacity: usize) void {
+    const dest = mapped orelse return;
+    var i = count;
+    while (i < capacity) : (i += 1) {
+        dest[i] = std.mem.zeroes(ui_mod.RectCmd);
+    }
 }
 
 
@@ -1289,6 +1350,7 @@ fn createTextPipeline(state: *State) !void {
         .{ .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .pImmutableSamplers = null },
         .{ .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .pImmutableSamplers = null },
         .{ .binding = 2, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .pImmutableSamplers = null },
+        .{ .binding = 3, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .pImmutableSamplers = null },
     };
     const set_layout_info = VkDescriptorSetLayoutCreateInfo{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1304,7 +1366,7 @@ fn createTextPipeline(state: *State) !void {
 
     const pool_sizes = [_]VkDescriptorPoolSize{
         .{ .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 2 },
-        .{ .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
+        .{ .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2 },
     };
     const pool_info = VkDescriptorPoolCreateInfo{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1346,7 +1408,12 @@ fn createTextPipeline(state: *State) !void {
     const glyph_buffer_info = VkDescriptorBufferInfo{
         .buffer = state.glyph_buffer,
         .offset = 0,
-        .range = 32 * @sizeOf(Instance),
+        .range = 96 * @sizeOf(Instance),
+    };
+    const rects_buffer_info = VkDescriptorBufferInfo{
+        .buffer = state.rects_buffer,
+        .offset = 0,
+        .range = 64 * @sizeOf(ui_mod.RectCmd),
     };
     const writes = [_]VkWriteDescriptorSet{
         .{
@@ -1383,6 +1450,18 @@ fn createTextPipeline(state: *State) !void {
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .pImageInfo = null,
             .pBufferInfo = @ptrCast(&glyph_buffer_info),
+            .pTexelBufferView = null,
+        },
+        .{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = null,
+            .dstSet = set,
+            .dstBinding = 3,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pImageInfo = null,
+            .pBufferInfo = @ptrCast(&rects_buffer_info),
             .pTexelBufferView = null,
         },
     };
@@ -1429,34 +1508,66 @@ fn createTextPipeline(state: *State) !void {
         return error.CreateTextComputePipelineFailed;
     }
     state.text_pipeline = pipeline;
+
+    // UI pipeline: identical set layout, zero push constants.
+    const ui_code_bytes = ui_spv_bytes;
+    if (ui_code_bytes.len % 4 != 0) return error.BadUiSpvSize;
+    var ui_code: [8192]u32 = undefined;
+    for (0..ui_code_bytes.len / 4) |i| {
+        ui_code[i] = std.mem.readInt(u32, ui_code_bytes[i * 4 ..][0..4], .little);
+    }
+    const ui_code_slice = ui_code[0 .. ui_code_bytes.len / 4];
+    const ui_shader_info = VkShaderModuleCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .codeSize = ui_code_bytes.len,
+        .pCode = @ptrCast(ui_code_slice),
+    };
+    var ui_shader: VkShaderModule = undefined;
+    if (state.vk.vkCreateShaderModule(state.device, &ui_shader_info, null, &ui_shader) != VK_SUCCESS) {
+        return error.CreateUiShaderModuleFailed;
+    }
+    const ui_layout_create = VkPipelineLayoutCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .setLayoutCount = 1,
+        .pSetLayouts = @ptrCast(&set_layout),
+        .pushConstantRangeCount = 0,
+        .pPushConstantRanges = null,
+    };
+    var ui_pipeline_layout: VkPipelineLayout = undefined;
+    if (state.vk.vkCreatePipelineLayout(state.device, &ui_layout_create, null, &ui_pipeline_layout) != VK_SUCCESS) {
+        return error.CreateUiPipelineLayoutFailed;
+    }
+    state.ui_pipeline_layout = ui_pipeline_layout;
+    const ui_stage = VkPipelineShaderStageCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = ui_shader,
+        .pName = "main",
+        .pSpecializationInfo = null,
+    };
+    const ui_pipeline_info = VkComputePipelineCreateInfo{
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .stage = ui_stage,
+        .layout = ui_pipeline_layout,
+        .basePipelineHandle = null,
+        .basePipelineIndex = -1,
+    };
+    var ui_pipeline: VkPipeline = undefined;
+    if (state.vk.vkCreateComputePipelines(state.device, null, 1, &ui_pipeline_info, null, @ptrCast(&ui_pipeline)) != VK_SUCCESS) {
+        return error.CreateUiComputePipelineFailed;
+    }
+    state.ui_pipeline = ui_pipeline;
 }
 
-fn writeGlyphInstances(state: *State) !u32 {
-    const allocator = std.heap.page_allocator;
-    const mapped = state.glyph_mapped orelse return error.GlyphBufferNotMapped;
-
-    // Tagline above the ring (bone) and the wordmark below it (brass),
-    // both laid out by the from-zero layout engine.
-    var tagline = try textlayout_mod.layout(&state.font_parsed, allocator, "BUILT FROM ZERO", 0, 20.0, @floatFromInt(WIDTH), .center);
-    defer tagline.deinit();
-    var wordmark = try textlayout_mod.layout(&state.font_parsed, allocator, "SIFR", 0, @as(f64, @floatFromInt(HEIGHT)) - 64.0, @floatFromInt(WIDTH), .center);
-    defer wordmark.deinit();
-
-    var index: usize = 0;
-    for (tagline.instances) |instance| {
-        mapped[index] = instance;
-        index += 1;
-    }
-    const tagline_count: u32 = @intCast(index);
-    for (wordmark.instances) |instance| {
-        mapped[index] = instance;
-        index += 1;
-    }
-    state.caption_split = tagline_count;
-    return @intCast(index);
-}
-
-fn recordFrame(state: *State, time: f32) !void {
+fn recordFrame(state: *State, time: f32, ui_rects: []const ui_mod.RectCmd, ui_instances: []const Instance) !void {
     const cmd = state.command_buffer;
 
     const begin_info = VkCommandBufferBeginInfo{
@@ -1472,38 +1583,58 @@ fn recordFrame(state: *State, time: f32) !void {
     state.vk.vkCmdPushConstants(cmd, state.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, @ptrCast(&time));
     state.vk.vkCmdDispatch(cmd, WIDTH / 8, HEIGHT / 8, 1);
 
-    const glyph_count = writeGlyphInstances(state) catch 0;
-    const split = state.caption_split;
-    if (glyph_count > 0 and split > 0 and glyph_count > split) {
+    const dispatch_barrier = VkImageMemoryBarrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .pNext = null,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUED_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUED_FAMILY_IGNORED,
+        .image = state.image,
+        .subresourceRange = .{
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+
+    // Upload UI draw records into their persistently mapped SSBOs.
+    if (state.glyph_mapped) |mapped| {
+        const capacity = 96;
+        @memcpy(mapped[0..ui_instances.len], ui_instances);
+        zeroUnusedTail(state.glyph_mapped, ui_instances.len, capacity);
+    }
+    if (state.rects_mapped) |mapped| {
+        const capacity = 64;
+        @memcpy(mapped[0..ui_rects.len], ui_rects);
+        zeroUnusedRects(state.rects_mapped, ui_rects.len, capacity);
+    }
+
+    const text_count: u32 = @intCast(ui_instances.len);
+    const rect_count: u32 = @intCast(ui_rects.len);
+
+
+    if (rect_count > 0) {
+        state.vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, state.ui_pipeline);
+        state.vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, state.ui_pipeline_layout, 0, 1, @ptrCast(&state.text_descriptor_set), 0, null);
+        state.vk.vkCmdDispatch(cmd, WIDTH / 8, HEIGHT / 8, 1);
+        state.vk.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, null, 0, null, 1, &dispatch_barrier);
+    }
+
+    if (text_count > 0) {
         state.vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, state.text_pipeline);
         state.vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, state.text_pipeline_layout, 0, 1, @ptrCast(&state.text_descriptor_set), 0, null);
-
-        const tagline_push = TextPush{
-            .r = 0.953,
-            .g = 0.969,
-            .b = 0.996,
-            .a = 1.0,
-            .first_glyph = 0,
-            .count = split,
+        const push = TextPush{
+            .count = text_count,
             .frame_width = WIDTH,
             .frame_height = HEIGHT,
             .cell = @intCast(atlas_mod.CELL),
         };
-        state.vk.vkCmdPushConstants(cmd, state.text_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(TextPush), @ptrCast(&tagline_push));
-        state.vk.vkCmdDispatch(cmd, WIDTH / 8, HEIGHT / 8, 1);
-
-        const wordmark_push = TextPush{
-            .r = 0.918,
-            .g = 0.706,
-            .b = 0.267,
-            .a = 1.0,
-            .first_glyph = split,
-            .count = glyph_count - split,
-            .frame_width = WIDTH,
-            .frame_height = HEIGHT,
-            .cell = @intCast(atlas_mod.CELL),
-        };
-        state.vk.vkCmdPushConstants(cmd, state.text_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(TextPush), @ptrCast(&wordmark_push));
+        state.vk.vkCmdPushConstants(cmd, state.text_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(TextPush), @ptrCast(&push));
         state.vk.vkCmdDispatch(cmd, WIDTH / 8, HEIGHT / 8, 1);
     }
 
@@ -1591,6 +1722,14 @@ const WindowState = struct {
     globals: [8]Global = undefined,
     frame_callback: ?u32 = null,
     connection: wayland.Connection,
+    seat: ?u32 = null,
+    keyboard: ?u32 = null,
+    pointer: ?u32 = null,
+    pointer_x: f64 = -1,
+    pointer_y: f64 = -1,
+    pointer_down: bool = false,
+    keyboard_focused: bool = false,
+    quit_requested: bool = false,
 
     const Global = struct {
         name: u32,
@@ -1622,6 +1761,59 @@ const WindowState = struct {
             try self.connection.send(self.ids.wm_base.?, 3, &pong);
         }
 
+        if (self.seat != null and event.sender == self.seat.?) {
+            if (event.opcode == 0) {
+                std.debug.print("cipher: seat capabilities {d}\n", .{event.read32(0)});
+            }
+        }
+
+        if (self.keyboard != null and event.sender == self.keyboard.?) {
+            switch (event.opcode) {
+                0 => {
+                    const size = event.read32(1);
+                    if (event.fd) |fdv| _ = std.os.linux.close(fdv);
+                    std.debug.print("cipher: keymap received (size {d}), fd closed\n", .{size});
+                },
+                1 => {
+                    self.keyboard_focused = true;
+                    std.debug.print("cipher: keyboard focus acquired\n", .{});
+                },
+                2 => self.keyboard_focused = false,
+                3 => {
+                    const key = event.read32(2);
+                    const state = event.read32(3);
+                    if (state == 1 and (key == 1 or key == 16)) {
+                        std.debug.print("cipher: quit key pressed\n", .{});
+                        self.quit_requested = true;
+                    }
+                },
+                else => {},
+            }
+        }
+
+        if (self.pointer != null and event.sender == self.pointer.?) {
+            switch (event.opcode) {
+                0 => std.debug.print("cipher: pointer entered surface\n", .{}),
+                1 => {
+                    self.pointer_x = -1;
+                    self.pointer_y = -1;
+                },
+                2 => {
+                    self.pointer_x = event.fixed24_8(1);
+                    self.pointer_y = event.fixed24_8(2);
+                },
+                3 => {
+                    const button = event.read32(2);
+                    const state = event.read32(3);
+                    if (button == 0x110) { // BTN_LEFT
+                        self.pointer_down = state == 1;
+                        std.debug.print("cipher: left button {d} at ({d:.1}, {d:.1})\n", .{ state, self.pointer_x, self.pointer_y });
+                    }
+                },
+                else => {},
+            }
+        }
+
         return event;
     }
 
@@ -1633,7 +1825,7 @@ const WindowState = struct {
                 const name = reader.read32();
                 const interface = reader.str();
                 const version = reader.read32();
-                const wanted = [_][]const u8{ "wl_compositor", "wl_shm", "xdg_wm_base" };
+                const wanted = [_][]const u8{ "wl_compositor", "wl_shm", "xdg_wm_base", "wl_seat" };
                 for (wanted) |needle| {
                     if (!std.mem.eql(u8, interface, needle)) continue;
                     if (self.findGlobal(needle) != null) continue;
@@ -1670,6 +1862,7 @@ const WindowState = struct {
             .{ "wl_compositor", 4 },
             .{ "wl_shm", 1 },
             .{ "xdg_wm_base", 6 },
+            .{ "wl_seat", 5 },
         };
 
         inline for (binds) |entry| {
@@ -1691,6 +1884,10 @@ const WindowState = struct {
             if (std.mem.eql(u8, interface, "wl_compositor")) self.ids.compositor = object_id;
             if (std.mem.eql(u8, interface, "wl_shm")) self.ids.shm = object_id;
             if (std.mem.eql(u8, interface, "xdg_wm_base")) self.ids.wm_base = object_id;
+            if (std.mem.eql(u8, interface, "wl_seat")) {
+                self.ids.seat = object_id;
+                self.seat = object_id;
+            }
         }
     }
 
@@ -1739,8 +1936,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var args_iter = std.process.Args.Iterator.init(init.args);
     _ = args_iter.next();
     var debug_const = false;
+    var demo_hover: ?u32 = null;
+    var demo_press: ?u32 = null;
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--debug-const")) debug_const = true;
+        if (std.mem.eql(u8, arg, "--demo-hover=1")) demo_hover = 1;
+        if (std.mem.eql(u8, arg, "--demo-hover=2")) demo_hover = 2;
+        if (std.mem.eql(u8, arg, "--demo-press=1")) demo_press = 1;
+        if (std.mem.eql(u8, arg, "--demo-press=2")) demo_press = 2;
     }
 
     var vulkan_state = State{
@@ -1780,6 +1983,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     try app.collectGlobals();
     try app.bindRequired();
+
+    {
+        const seat = app.seat orelse return wayland.Error.ProtocolError;
+        app.keyboard = app.ids.new();
+        var cursor = wayland.Cursor{};
+        cursor.writeU32(app.keyboard.?);
+        try app.connection.send(seat, 1, cursor.slice()); // get_keyboard
+        app.pointer = app.ids.new();
+        cursor = wayland.Cursor{};
+        cursor.writeU32(app.pointer.?);
+        try app.connection.send(seat, 0, cursor.slice()); // get_pointer
+    }
 
     const surface_id = app.ids.new();
     {
@@ -1838,9 +2053,66 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.debug.print("gpuframe: xdg toplevel configured (serial {d})\n", .{app.serial});
 
     const shm_pixels_u32: []u32 = @ptrCast(@alignCast(shm.pixels));
-    while (app.frame_index < FRAME_COUNT) : (app.frame_index += 1) {
+    _ = shm_pixels_u32;
+
+    var ui_context = ui_mod.WidgetContext{};
+    ui_context.font = &vulkan_state.font_parsed;
+
+    var frame_presented: u32 = 0;
+    while (app.frame_index < FRAME_COUNT and !app.quit_requested) : (app.frame_index += 1) {
         const time: f32 = @as(f32, @floatFromInt(app.frame_index)) / 60.0;
-        try recordFrame(&vulkan_state, time);
+
+        const windowRects = ui_mod.WidgetContext.demoWindowRects(@floatFromInt(WIDTH), @floatFromInt(HEIGHT)) catch |err| {
+            std.debug.print("gpuframe: layout failed: {}\n", .{err});
+            return err;
+        };
+
+        // Demo hooks (labeled test-only): force the pointer into a button so
+        // hover/press states can be evidenced headlessly. Without flags, real
+        // wl_pointer events drive the same code path.
+        var px: f64 = app.pointer_x;
+        var py: f64 = app.pointer_y;
+        var pdown: bool = app.pointer_down;
+        if (demo_hover) |which| {
+            const target = if (which == 1) windowRects.calibrate else windowRects.shutdown;
+            px = target.x + target.width / 2.0;
+            py = target.y + target.height / 2.0;
+        }
+        if (demo_press) |which| {
+            const target = if (which == 1) windowRects.calibrate else windowRects.shutdown;
+            px = target.x + target.width / 2.0;
+            py = target.y + target.height / 2.0;
+            pdown = app.frame_index >= 10 and app.frame_index < 14;
+        }
+
+        ui_context.beginFrame(px, py, pdown);
+
+        // Tagline (static, bone).
+        try ui_context.label("BUILT FROM ZERO", 0, 20.0, @floatFromInt(WIDTH), .center, ui_mod.TEXT);
+
+        // Bottom panel: title + status on the left, two buttons on the right.
+        try ui_context.panel(windowRects.panel);
+        const ascent = 0.970 * @as(f64, @floatFromInt(atlas_mod.PX_EM)); // Instrument Sans ascender fraction
+        try ui_context.label("CIPHER", windowRects.status.x, 356.0 - ascent, windowRects.status.width, .left, ui_mod.BRASS);
+        const status_label = if (vulkan_state.calibrated) "NOMINAL" else "STANDBY";
+        const status_color = if (vulkan_state.calibrated) ui_mod.BRASS else ui_mod.MUTED;
+        try ui_context.label(status_label, windowRects.status.x, 384.0 - ascent, windowRects.status.width, .left, status_color);
+
+        const clicked_calibrate = try ui_context.button(1, windowRects.calibrate, "CALIBRATE");
+        const clicked_shutdown = try ui_context.button(2, windowRects.shutdown, "EXIT");
+        if (clicked_calibrate) {
+            vulkan_state.calibrated = !vulkan_state.calibrated;
+            std.debug.print("cipher: calibrate toggled -> calibrated={}\n", .{vulkan_state.calibrated});
+        }
+        if (clicked_shutdown) {
+            std.debug.print("cipher: SHUT DOWN clicked; closing\n", .{});
+            app.quit_requested = true;
+        }
+
+        const ui_rects_slice = ui_context.rects.items;
+        const ui_instances_slice = ui_context.instances.items;
+
+        try recordFrame(&vulkan_state, time, ui_rects_slice, ui_instances_slice);
 
         var mapped: ?*anyopaque = null;
         if (vulkan_state.vk.vkMapMemory(vulkan_state.device, vulkan_state.staging_memory, 0, vulkan_state.staging_memory_size, 0, &mapped) != VK_SUCCESS) {
@@ -1857,7 +2129,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             dst[3] = src[3]; // A
         }
 
-        if (app.frame_index + 1 == FRAME_COUNT) {
+        if (app.frame_index + 1 == FRAME_COUNT or app.quit_requested) {
             writePpm(staging, "/tmp/opencode/gpuframe.ppm") catch |err| {
                 std.debug.print("gpuframe: ppm write failed: {}\n", .{err});
             };
@@ -1865,7 +2137,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         vulkan_state.vk.vkUnmapMemory(vulkan_state.device, vulkan_state.staging_memory);
 
-        _ = shm_pixels_u32;
         {
             var cursor = wayland.Cursor{};
             cursor.writeU32(app.ids.buffer.?);
@@ -1884,15 +2155,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try app.requestFrameCallback();
         try app.connection.send(app.ids.surface.?, 6, &.{}); // commit
         try app.waitForFrameDone();
+        frame_presented += 1;
     }
 
+    if (app.keyboard) |id| try app.connection.send(id, 0, &.{}); // wl_keyboard.release
+    if (app.pointer) |id| try app.connection.send(id, 1, &.{}); // wl_pointer.release
+    if (app.seat) |id| try app.connection.send(id, 3, &.{}); // wl_seat.release
     if (app.ids.toplevel) |id| try app.connection.send(id, 0, &.{});
     if (app.ids.xdg_surface) |id| try app.connection.send(id, 0, &.{});
     if (app.ids.buffer) |id| try app.connection.send(id, 0, &.{});
     if (app.ids.shm_pool) |id| try app.connection.send(id, 1, &.{});
     if (app.ids.surface) |id| try app.connection.send(id, 0, &.{});
 
-    std.debug.print("gpuframe: WAYLAND_PROTOCOL_OK frames={d}\n", .{FRAME_COUNT});
+    std.debug.print("gpuframe: WAYLAND_PROTOCOL_OK frames={d}\n", .{frame_presented});
 }
 
 fn writePpm(staging: []const u8, path_c: [:0]const u8) !void {

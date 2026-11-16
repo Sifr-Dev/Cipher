@@ -72,6 +72,7 @@ pub fn layout(
     block_top: f64,
     max_width: f64,
     alignment: Alignment,
+    color: [4]f32,
 ) Error!TextBlock {
     const scale = @as(f64, @floatFromInt(atlas_mod.PX_EM)) / @as(f64, @floatFromInt(f.head.units_per_em));
     const ascent = @as(f64, @floatFromInt(f.hhea.ascender)) * scale;
@@ -106,7 +107,7 @@ pub fn layout(
                 current_width + space_width + word_width;
 
             if (current.items.len > 0 and projected > max_width) {
-                try flushLine(f, allocator, &current, current_width, origin_x, max_width, alignment, lines.items.len, block_top, line_height, &lines, &instances);
+                try flushLine(f, allocator, &current, current_width, origin_x, max_width, alignment, lines.items.len, block_top, line_height, &lines, &instances, color);
                 current.clearRetainingCapacity();
                 current_width = 0;
             }
@@ -117,7 +118,7 @@ pub fn layout(
         }
 
         if (current.items.len > 0) {
-            try flushLine(f, allocator, &current, current_width, origin_x, max_width, alignment, lines.items.len, block_top, line_height, &lines, &instances);
+            try flushLine(f, allocator, &current, current_width, origin_x, max_width, alignment, lines.items.len, block_top, line_height, &lines, &instances, color);
         }
     }
 
@@ -148,6 +149,7 @@ fn flushLine(
     line_height: f64,
     lines: *std.ArrayList(LineBox),
     instances: *std.ArrayList(atlas_mod.Instance),
+    color: [4]f32,
 ) Error!void {
     const scale = @as(f64, @floatFromInt(atlas_mod.PX_EM)) / @as(f64, @floatFromInt(f.head.units_per_em));
     const ascent = @as(f64, @floatFromInt(f.hhea.ascender)) * scale;
@@ -163,7 +165,7 @@ fn flushLine(
     const space_width = wordAdvance(f, scale, " ");
     for (words.items, 0..) |word, i| {
         const word_width = wordAdvance(f, scale, word);
-        const word_instances = try atlas_mod.Atlas.instancesFor(f, allocator, word, pen, baseline);
+        const word_instances = try atlas_mod.Atlas.instancesFor(f, allocator, word, pen, baseline, color);
         defer allocator.free(word_instances);
         for (word_instances) |instance| {
             try instances.append(allocator, instance);
@@ -189,14 +191,15 @@ test "wrapping produces the expected line boxes" {
     defer allocator.free(bytes);
     const parsed = try font_mod.Font.parse(bytes);
 
-    var block = try layout(&parsed, allocator, "SIFR\nBUILT FROM ZERO", 0, 0, 640.0, .center);
+    const bone = [4]f32{ 0.953, 0.969, 0.996, 1.0 };
+    var block = try layout(&parsed, allocator, "SIFR\nBUILT FROM ZERO", 0, 0, 640.0, .center, bone);
     defer block.deinit();
     try std.testing.expectEqual(@as(usize, 2), block.line_count);
     try std.testing.expect(block.instances.len > 10);
     try std.testing.expect(block.width < 640.0);
 
     // The same string wraps when the max width shrinks.
-    var narrow = try layout(&parsed, allocator, "BUILT FROM ZERO", 0, 0, 100.0, .left);
+    var narrow = try layout(&parsed, allocator, "BUILT FROM ZERO", 0, 0, 100.0, .left, bone);
     defer narrow.deinit();
     try std.testing.expect(narrow.line_count > 1);
     try std.testing.expect(narrow.instances.len >= block.instances.len or narrow.line_count > 1);

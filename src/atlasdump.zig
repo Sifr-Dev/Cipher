@@ -21,7 +21,8 @@ pub fn main(init: std.process.Init) !void {
     var atlas = atlas_mod.Atlas.init(gpa);
     try atlas.build(&parsed, gpa);
 
-    const instances = try atlas_mod.Atlas.instancesFor(&parsed, gpa, "SIFR Cipher 0123456789", 16.0, 120.0);
+    const bone = [4]f32{ 0.953, 0.969, 0.996, 1.0 };
+    const instances = try atlas_mod.Atlas.instancesFor(&parsed, gpa, "SIFR Cipher 0123456789", 16.0, 120.0, bone);
     defer gpa.free(instances);
 
     try writePpm(&atlas.pixels, out_path);

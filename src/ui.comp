@@ -1,0 +1,39 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0, rgba8) uniform image2D frame;
+layout(std430, set = 0, binding = 3) readonly buffer Rects { vec4 rects[]; };
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(frame);
+    if (any(greaterThanEqual(coord, size))) {
+        return;
+    }
+
+    vec4 src = imageLoad(frame, coord);
+    vec4 acc = src;
+
+    for (uint i = 0; i < 64u; ++i) {
+        vec4 r = rects[i * 4];
+        if (r.z <= 0.0 || r.w <= 0.0) {
+            continue; // sentinel: zero-size rect ends the list early
+        }
+        vec2 p = vec2(coord) + 0.5;
+        if (p.x < r.x || p.y < r.y || p.x >= r.x + r.z || p.y >= r.y + r.w) {
+            continue;
+        }
+        vec4 fill = rects[i * 4 + 1];
+        vec4 border = rects[i * 4 + 2];
+        vec4 meta = rects[i * 4 + 3];
+
+        float dx = min(p.x - r.x, (r.x + r.z) - p.x);
+        float dy = min(p.y - r.y, (r.y + r.w) - p.y);
+        float edge = min(dx, dy);
+        bool on_border = meta.x > 0.0 && border.a > 0.0 && edge <= meta.x;
+
+        vec4 paint = on_border ? border : fill;
+        acc = mix(acc, paint, paint.a);
+    }
+
+    imageStore(frame, coord, acc);
+}

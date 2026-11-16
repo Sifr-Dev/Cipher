@@ -22,6 +22,10 @@ pub const Instance = extern struct {
     dst_y: f32,
     src_x: f32,
     src_y: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
 };
 
 pub const Atlas = struct {
@@ -75,7 +79,7 @@ pub const Atlas = struct {
     }
 
     /// Instances for a string rasterized at pen origin (frame coords, y-down).
-    pub fn instancesFor(parsed: *const font.Font, allocator: std.mem.Allocator, text: []const u8, pen_x: f64, baseline_y: f64) ![]Instance {
+    pub fn instancesFor(parsed: *const font.Font, allocator: std.mem.Allocator, text: []const u8, pen_x: f64, baseline_y: f64, color: [4]f32) ![]Instance {
         var instances = std.ArrayList(Instance).empty;
         defer instances.deinit(allocator);
 
@@ -94,6 +98,10 @@ pub const Atlas = struct {
                     .dst_y = @floatCast(baseline_y - BASELINE_Y),
                     .src_x = @floatFromInt(cell.col * CELL),
                     .src_y = @floatFromInt(cell.row * CELL),
+                    .r = color[0],
+                    .g = color[1],
+                    .b = color[2],
+                    .a = color[3],
                 });
             }
             pen += @as(f64, @floatFromInt(parsed.glyphAdvance(glyph))) * scale;
