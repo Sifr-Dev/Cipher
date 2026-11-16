@@ -1,109 +1,332 @@
 const std = @import("std");
-const c = @import("c");
 const geometry = @import("geometry.zig");
+const render = @import("render.zig");
+const wayland = @import("wayland.zig");
 
-const VOID: u32 = 0x04060b;
-const LINE: u32 = 0x2d3038;
-const TEXT: u32 = 0xf3f7fe;
-const BRASS: u32 = 0xeab444;
+const WIDTH = render.WIDTH;
+const HEIGHT = render.HEIGHT;
+const FRAME_COUNT = 24;
 
-pub fn main() !void {
-    const conn = c.xcb_connect(null, null);
-    if (conn == null or c.xcb_connection_has_error(conn) != 0) {
-        std.debug.print("cipher: failed to connect to X11\n", .{});
-        return error.X11ConnectionFailed;
+const Reader = struct {
+    data: []const u8,
+    pos: usize = 0,
+
+    fn read32(self: *Reader) u32 {
+        const value = std.mem.readInt(u32, self.data[self.pos..][0..4], .little);
+        self.pos += 4;
+        return value;
     }
-    defer _ = c.xcb_disconnect(conn);
 
-    const setup = c.xcb_get_setup(conn);
-    const roots = c.xcb_setup_roots_iterator(setup);
-    const screen = roots.data;
+    fn str(self: *Reader) []const u8 {
+        const length = self.read32();
+        const result = self.data[self.pos..][0 .. length - 1];
+        self.pos += length;
+        while (self.pos % 4 != 0) self.pos += 1;
+        return result;
+    }
+};
 
-    const window: c.xcb_window_t = c.xcb_generate_id(conn);
-    _ = c.xcb_create_window(
-        conn,
-        screen.*.root_depth,
-        window,
-        screen.*.root,
-        120,
-        120,
-        640,
-        400,
-        0,
-        c.XCB_WINDOW_CLASS_INPUT_OUTPUT,
-        screen.*.root_visual,
-        c.XCB_CW_BACK_PIXEL | c.XCB_CW_EVENT_MASK,
-        &[_]u32{ VOID, c.XCB_EVENT_MASK_EXPOSURE | c.XCB_EVENT_MASK_KEY_PRESS },
-    );
-    _ = c.xcb_map_window(conn, window);
+const Global = struct {
+    name: u32,
+    interface_len: usize,
+    interface: [32]u8,
+    version: u32,
 
-    const gc = c.xcb_generate_id(conn);
-    _ = c.xcb_create_gc(conn, gc, window, c.XCB_GC_FOREGROUND | c.XCB_GC_LINE_WIDTH, &[_]u32{ TEXT, 2 });
+    fn iface(self: *const Global) []const u8 {
+        return self.interface[0..self.interface_len];
+    }
+};
 
-    _ = c.xcb_flush(conn);
-    draw(conn, window, gc);
-    _ = c.xcb_flush(conn);
-    std.debug.print("cipher: window mapped (id {})\n", .{window});
+const Client = struct {
+    connection: wayland.Connection,
+    ids: wayland.ObjectIds = .{},
+    debug: bool = false,
+    configured: bool = false,
+    serial: u32 = 0,
+    frame_index: u32 = 0,
+    globals_len: usize = 0,
+    globals: [8]Global = undefined,
 
-    while (c.xcb_wait_for_event(conn)) |event| {
-        const eventType = event.*.response_type & 0x7f;
-        switch (eventType) {
-            c.XCB_EXPOSE => {
-                draw(conn, window, gc);
-                _ = c.xcb_flush(conn);
-            },
-            c.XCB_KEY_PRESS => {
-                _ = c.free(event);
-                break;
-            },
-            else => {},
+    const wanted = [_][]const u8{ "wl_compositor", "wl_shm", "xdg_wm_base" };
+
+    fn rememberGlobal(self: *Client, name: u32, interface: []const u8, version: u32) void {
+        for (wanted) |needle| {
+            if (!std.mem.eql(u8, interface, needle)) continue;
+            if (self.findGlobal(needle) != null) return; // first advertisement wins
+            if (self.globals_len >= self.globals.len) return;
+            var global = Global{
+                .name = name,
+                .interface_len = @min(interface.len, 32),
+                .interface = undefined,
+                .version = version,
+            };
+            @memcpy(global.interface[0..global.interface_len], interface[0..global.interface_len]);
+            self.globals[self.globals_len] = global;
+            self.globals_len += 1;
+            return;
         }
-        if (eventType != c.XCB_KEY_PRESS) _ = c.free(event);
     }
-}
 
-fn draw(conn: ?*c.xcb_connection_t, window: c.xcb_window_t, gc: c.xcb_gcontext_t) void {
-    const cx: i16 = 320;
-    const cy: i16 = 200;
+    fn findGlobal(self: *Client, interface: []const u8) ?*const Global {
+        for (self.globals[0..self.globals_len]) |*global| {
+            if (std.mem.eql(u8, global.iface(), interface)) return global;
+        }
+        return null;
+    }
 
-    var ring: usize = 0;
-    while (ring < 3) : (ring += 1) {
-        const radius: i16 = @intCast(120 - ring * 36);
-        setForeground(conn, gc, LINE);
-        var arcs = [_]c.xcb_arc_t{
-            .{
-                .x = cx - radius,
-                .y = cy - radius,
-                .width = @intCast(radius * 2),
-                .height = @intCast(radius * 2),
-                .angle1 = 0,
-                .angle2 = 360 * 64,
-            },
+    fn next(self: *Client) !wayland.Event {
+        var event: wayland.Event = undefined;
+        try self.connection.recv(&event);
+
+        if (self.debug) {
+            std.debug.print("event sender={d} opcode={d} len={d}\n", .{ event.sender, event.opcode, event.len });
+        }
+
+        if (event.sender == wayland.WL_DISPLAY and event.opcode == 0) {
+            var reader = Reader{ .data = event.payload() };
+            const object_id = reader.read32();
+            const code = reader.read32();
+            const message = reader.str();
+            std.debug.print("wayland error object={d} code={d}: {s}\n", .{ object_id, code, message });
+            return wayland.Error.ProtocolError;
+        }
+
+        if (self.ids.wm_base != null and event.sender == self.ids.wm_base.? and event.opcode == 0) {
+            // xdg_wm_base ping: answer pong with the same serial.
+            var pong: [4]u8 = undefined;
+            std.mem.writeInt(u32, &pong, event.read32(0), .little);
+            try self.connection.send(self.ids.wm_base.?, 3, &pong);
+        }
+
+        return event;
+    }
+
+    fn waitForSyncDone(self: *Client) !void {
+        while (true) {
+            const event = try self.next();
+            if (self.ids.sync_callback != null and event.sender == self.ids.sync_callback.? and event.opcode == 0) {
+                return;
+            }
+        }
+    }
+
+    fn collectGlobals(self: *Client) !void {
+        while (true) {
+            const event = try self.next();
+            if (self.ids.registry != null and event.sender == self.ids.registry.? and event.opcode == 0) {
+                var reader = Reader{ .data = event.payload() };
+                const name = reader.read32();
+                const interface = reader.str();
+                const version = reader.read32();
+                self.rememberGlobal(name, interface, version);
+                continue;
+            }
+            if (self.ids.sync_callback != null and event.sender == self.ids.sync_callback.? and event.opcode == 0) {
+                return;
+            }
+        }
+    }
+
+    fn bindRequired(self: *Client) !void {
+        const binds = .{
+            .{ "wl_compositor", 4 },
+            .{ "wl_shm", 1 },
+            .{ "xdg_wm_base", 6 },
         };
-        _ = c.xcb_poly_arc(conn, window, gc, 1, &arcs);
+
+        inline for (binds) |entry| {
+            const interface = entry[0];
+            const cap = entry[1];
+            const global = self.findGlobal(interface) orelse {
+                std.debug.print("cipher: compositor did not advertise {s}\n", .{interface});
+                return wayland.Error.ProtocolError;
+            };
+            const version = @min(global.version, cap);
+            const object_id = self.ids.new();
+            var cursor = wayland.Cursor{};
+            cursor.writeU32(global.name);
+            cursor.str(interface);
+            cursor.writeU32(version);
+            cursor.writeU32(object_id);
+            try self.connection.send(self.ids.registry.?, 0, cursor.slice());
+
+            if (std.mem.eql(u8, interface, "wl_compositor")) self.ids.compositor = object_id;
+            if (std.mem.eql(u8, interface, "wl_shm")) self.ids.shm = object_id;
+            if (std.mem.eql(u8, interface, "xdg_wm_base")) self.ids.wm_base = object_id;
+        }
     }
 
-    var cell_index: usize = 0;
-    while (cell_index < geometry.CELL_COUNT) : (cell_index += 1) {
-        const cell = geometry.cellCenter(cell_index, 120.0);
-        const is_index = cell_index == 0;
-        setForeground(conn, gc, if (is_index) BRASS else TEXT);
-        var points = [_]c.xcb_point_t{
-            .{
-                .x = @intFromFloat(cx + cell.x),
-                .y = @intFromFloat(cy + cell.y),
-            },
-        };
-        _ = c.xcb_poly_point(conn, c.XCB_COORD_MODE_ORIGIN, window, gc, 1, &points);
+    fn setString(self: *Client, object_id: u32, opcode: u16, value: []const u8) !void {
+        var cursor = wayland.Cursor{};
+        cursor.str(value);
+        try self.connection.send(object_id, opcode, cursor.slice());
     }
 
-    setForeground(conn, gc, BRASS);
-    var center = [_]c.xcb_point_t{.{ .x = cx, .y = cy }};
-    _ = c.xcb_poly_point(conn, c.XCB_COORD_MODE_ORIGIN, window, gc, 1, &center);
-    _ = c.xcb_flush(conn);
-}
+    fn waitForConfigure(self: *Client) !void {
+        while (true) {
+            const event = try self.next();
+            if (self.ids.xdg_surface != null and event.sender == self.ids.xdg_surface.? and event.opcode == 0) {
+                self.serial = event.read32(0);
+                var cursor = wayland.Cursor{};
+                cursor.writeU32(self.serial);
+                try self.connection.send(self.ids.xdg_surface.?, 4, cursor.slice()); // ack_configure
+                self.configured = true;
+                return;
+            }
+        }
+    }
 
-fn setForeground(conn: ?*c.xcb_connection_t, gc: c.xcb_gcontext_t, pixel: u32) void {
-    const values = [_]u32{pixel};
-    _ = c.xcb_change_gc(conn, gc, c.XCB_GC_FOREGROUND, &values);
+    fn requestFrameCallback(self: *Client) !void {
+        const callback = self.ids.new();
+        self.ids.frame_callback = callback;
+        var cursor = wayland.Cursor{};
+        cursor.writeU32(callback);
+        try self.connection.send(self.ids.surface.?, 3, cursor.slice()); // wl_surface.frame
+    }
+
+    fn waitForFrameDone(self: *Client) !void {
+        while (true) {
+            const event = try self.next();
+            if (self.ids.frame_callback != null and event.sender == self.ids.frame_callback.? and event.opcode == 0) {
+                return;
+            }
+        }
+    }
+};
+
+pub fn main(init: std.process.Init.Minimal) !void {
+    var frame_count: u32 = FRAME_COUNT;
+    var args_iter = std.process.Args.Iterator.init(init.args);
+    _ = args_iter.next();
+    while (args_iter.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--frames")) {
+            if (args_iter.next()) |raw| {
+                frame_count = std.fmt.parseUnsigned(u32, raw, 10) catch frame_count;
+            }
+        }
+    }
+
+    const runtime_dir = std.process.Environ.getPosix(init.environ, "XDG_RUNTIME_DIR") orelse "/run/user/1000";
+    const display_name = std.process.Environ.getPosix(init.environ, "WAYLAND_DISPLAY") orelse "wayland-0";
+
+    var app = Client{
+        .connection = try wayland.Connection.connect(runtime_dir, display_name),
+    };
+    defer app.connection.disconnect();
+
+    // get_registry: asks the compositor to list its globals.
+    {
+        app.ids.registry = app.ids.new();
+        var cursor = wayland.Cursor{};
+        cursor.writeU32(app.ids.registry.?);
+        try app.connection.send(wayland.WL_DISPLAY, 1, cursor.slice());
+    }
+
+    // sync: forces the compositor to deliver globals before the done event.
+    {
+        app.ids.sync_callback = app.ids.new();
+        var cursor = wayland.Cursor{};
+        cursor.writeU32(app.ids.sync_callback.?);
+        try app.connection.send(wayland.WL_DISPLAY, 0, cursor.slice());
+    }
+
+    try app.collectGlobals();
+    try app.bindRequired();
+    std.debug.print("cipher: bound wl_compositor={d} wl_shm={d} xdg_wm_base={d}\n", .{ app.ids.compositor.?, app.ids.shm.?, app.ids.wm_base.? });
+
+    const surface_id = app.ids.new();
+    {
+        var cursor = wayland.Cursor{};
+        cursor.writeU32(surface_id);
+        try app.connection.send(app.ids.compositor.?, 0, cursor.slice()); // create_surface
+        app.ids.surface = surface_id;
+    }
+
+    var shm = try wayland.ShmBuffer.allocate(WIDTH, HEIGHT);
+    defer shm.deinit();
+
+    const pool_id = app.ids.new();
+    const buffer_id = app.ids.new();
+    {
+        var cursor = wayland.Cursor{};
+        cursor.writeU32(pool_id);
+        cursor.writeI32(@intCast(shm.pixels.len));
+        try app.connection.sendFd(app.ids.shm.?, 0, cursor.slice(), shm.fd); // create_pool, fd via SCM_RIGHTS
+        app.ids.shm_pool = pool_id;
+    }
+    {
+        var cursor = wayland.Cursor{};
+        cursor.writeU32(buffer_id);
+        cursor.writeI32(0); // offset
+        cursor.writeI32(WIDTH);
+        cursor.writeI32(HEIGHT);
+        cursor.writeI32(WIDTH * 4); // stride
+        cursor.writeU32(0); // ARGB8888
+        try app.connection.send(pool_id, 0, cursor.slice()); // create_buffer
+        app.ids.buffer = buffer_id;
+    }
+
+    const xdg_surface_id = app.ids.new();
+    {
+        var cursor = wayland.Cursor{};
+        cursor.writeU32(xdg_surface_id);
+        cursor.writeU32(app.ids.surface.?);
+        try app.connection.send(app.ids.wm_base.?, 2, cursor.slice()); // get_xdg_surface
+        app.ids.xdg_surface = xdg_surface_id;
+    }
+
+    const toplevel_id = app.ids.new();
+    {
+        var cursor = wayland.Cursor{};
+        cursor.writeU32(toplevel_id);
+        try app.connection.send(app.ids.xdg_surface.?, 1, cursor.slice()); // get_toplevel
+        app.ids.toplevel = toplevel_id;
+    }
+
+    try app.setString(app.ids.toplevel.?, 2, "Cipher — SIFR"); // set_title
+    try app.setString(app.ids.toplevel.?, 3, "cipher"); // set_app_id
+
+    // Initial commit without a buffer: xdg_surface answers with configure.
+    try app.connection.send(app.ids.surface.?, 6, &.{}); // commit
+
+    try app.waitForConfigure();
+    std.debug.print("cipher: xdg toplevel configured (serial {d})\n", .{app.serial});
+
+    const pixels_u32: []u32 = @ptrCast(@alignCast(shm.pixels));
+    while (app.frame_index < frame_count) : (app.frame_index += 1) {
+        render.render(pixels_u32, @as(f64, @floatFromInt(app.frame_index)) / 60.0);
+
+        {
+            var cursor = wayland.Cursor{};
+            cursor.writeU32(app.ids.buffer.?);
+            cursor.writeI32(0);
+            cursor.writeI32(0);
+            try app.connection.send(app.ids.surface.?, 1, cursor.slice()); // attach
+        }
+        {
+            var cursor = wayland.Cursor{};
+            cursor.writeI32(0);
+            cursor.writeI32(0);
+            cursor.writeI32(WIDTH);
+            cursor.writeI32(HEIGHT);
+            try app.connection.send(app.ids.surface.?, 2, cursor.slice()); // damage
+        }
+        try app.requestFrameCallback();
+        try app.connection.send(app.ids.surface.?, 6, &.{}); // commit
+
+        if (app.frame_index + 1 == frame_count) {
+            try render.writePpm(pixels_u32, "/tmp/opencode/cipher_frame.ppm");
+        }
+
+        try app.waitForFrameDone();
+    }
+
+    // Teardown: destroy every client-created object we hold.
+    if (app.ids.toplevel) |id| try app.connection.send(id, 0, &.{}); // xdg_toplevel.destroy
+    if (app.ids.xdg_surface) |id| try app.connection.send(id, 0, &.{}); // xdg_surface.destroy
+    if (app.ids.buffer) |id| try app.connection.send(id, 0, &.{}); // wl_buffer.destroy
+    if (app.ids.shm_pool) |id| try app.connection.send(id, 1, &.{}); // wl_shm_pool.destroy
+    if (app.ids.surface) |id| try app.connection.send(id, 0, &.{}); // wl_surface.destroy
+
+    std.debug.print("cipher: WAYLAND_PROTOCOL_OK frames={d}\n", .{frame_count});
 }
