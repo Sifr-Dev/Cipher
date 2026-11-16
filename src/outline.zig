@@ -132,8 +132,12 @@ const Builder = struct {
 fn parseGlyphInto(f: *const font.Font, glyph_id: u16, allocator: std.mem.Allocator, builder: *Builder, depth: u8) Error!void {
     if (depth > 4) return Error.TooDeep;
     const glyf = f.glyfBytes() orelse return Error.MissingGlyf;
-    const location = f.glyphOffset(glyph_id) orelse return Error.MalformedGlyph;
-    const start: usize = @intCast(location);
+    const range = f.glyphByteRange(glyph_id) orelse return Error.MalformedGlyph;
+    if (range.len == 0) {
+        // Empty glyph (e.g., space): no outlines, successfully parsed as zero contours.
+        return;
+    }
+    const start: usize = @intCast(range.offset);
     if (start + 10 > glyf.len) return Error.MalformedGlyph;
 
     const number_of_contours = F.i16be(glyf, start);

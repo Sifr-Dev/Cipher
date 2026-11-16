@@ -141,6 +141,28 @@ pub const Font = struct {
         return self.tableBytes(tag('l', 'o', 'c', 'a'));
     }
 
+    /// Returns the absolute glyf-table byte range for a glyph.
+    /// Empty ranges (start == end) are legal and mean "no outlines".
+    pub fn glyphByteRange(self: *const Font, glyph: u16) ?struct { offset: u32, len: usize } {
+        const table = self.tableBytes(tag('l', 'o', 'c', 'a')) orelse return null;
+        const format: i16 = self.head.index_to_loc_format;
+        const next_glyph = @as(usize, glyph) + 1;
+        if (format == 0) {
+            const index: usize = @as(usize, glyph) * 2;
+            const next_index: usize = next_glyph * 2;
+            if (next_index + 2 > table.len) return null;
+            const start = @as(u32, std.mem.readInt(u16, table[index..][0..2], .big)) * 2;
+            const end = @as(u32, std.mem.readInt(u16, table[next_index..][0..2], .big)) * 2;
+            return .{ .offset = start, .len = @intCast(end - start) };
+        }
+        const index: usize = @as(usize, glyph) * 4;
+        const next_index: usize = next_glyph * 4;
+        if (next_index + 4 > table.len) return null;
+        const start = std.mem.readInt(u32, table[index..][0..4], .big);
+        const end = std.mem.readInt(u32, table[next_index..][0..4], .big);
+        return .{ .offset = start, .len = @intCast(end - start) };
+    }
+
     pub fn glyphOffset(self: *const Font, glyph: u16) ?u32 {
         const table = self.tableBytes(tag('l', 'o', 'c', 'a')) orelse return null;
         const format: i16 = self.head.index_to_loc_format;
@@ -156,9 +178,10 @@ pub const Font = struct {
     }
 
     pub fn glyphHeader(self: *const Font, glyph: u16) ?GlyphHeader {
-        const start = self.glyphOffset(glyph) orelse return null;
+        const range = self.glyphByteRange(glyph) orelse return null;
+        if (range.len == 0) return null;
         const glyf = self.tableBytes(tag('g', 'l', 'y', 'f')) orelse return null;
-        const index: usize = @intCast(start);
+        const index: usize = @intCast(range.offset);
         if (index + 10 > glyf.len) return null;
         return .{
             .number_of_contours = std.mem.readInt(i16, glyf[index..][0..2], .big),
