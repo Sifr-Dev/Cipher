@@ -1730,6 +1730,7 @@ const WindowState = struct {
     pointer_down: bool = false,
     keyboard_focused: bool = false,
     quit_requested: bool = false,
+    key_pressed: u32 = 0,
 
     const Global = struct {
         name: u32,
@@ -1782,9 +1783,13 @@ const WindowState = struct {
                 3 => {
                     const key = event.read32(2);
                     const state = event.read32(3);
-                    if (state == 1 and (key == 1 or key == 16)) {
-                        std.debug.print("cipher: quit key pressed\n", .{});
-                        self.quit_requested = true;
+                    if (state == 1) {
+                        if (key == 1 or key == 16) {
+                            std.debug.print("cipher: quit key pressed\n", .{});
+                            self.quit_requested = true;
+                        } else if (key == 15 or key == 28 or key == 57) {
+                            self.key_pressed = key;
+                        }
                     }
                 },
                 else => {},
@@ -1938,12 +1943,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var debug_const = false;
     var demo_hover: ?u32 = null;
     var demo_press: ?u32 = null;
+    var demo_focus: ?u32 = null;
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--debug-const")) debug_const = true;
         if (std.mem.eql(u8, arg, "--demo-hover=1")) demo_hover = 1;
         if (std.mem.eql(u8, arg, "--demo-hover=2")) demo_hover = 2;
         if (std.mem.eql(u8, arg, "--demo-press=1")) demo_press = 1;
         if (std.mem.eql(u8, arg, "--demo-press=2")) demo_press = 2;
+        if (std.mem.eql(u8, arg, "--demo-focus=1")) demo_focus = 1;
+        if (std.mem.eql(u8, arg, "--demo-focus=2")) demo_focus = 2;
     }
 
     var vulkan_state = State{
@@ -2084,6 +2092,23 @@ pub fn main(init: std.process.Init.Minimal) !void {
             py = target.y + target.height / 2.0;
             pdown = app.frame_index >= 10 and app.frame_index < 14;
         }
+
+        const pressed_key = app.key_pressed;
+        app.key_pressed = 0;
+        if (pressed_key == 15) { // evdev KEY_TAB
+            ui_context.cycleFocus();
+            std.debug.print("cipher: Tab -> focus id {d}\n", .{ui_context.focus_id});
+        }
+        if (pressed_key == 28 or pressed_key == 57) { // evdev KEY_ENTER / KEY_SPACE
+            if (ui_context.focus_id == 1) {
+                vulkan_state.calibrated = !vulkan_state.calibrated;
+                std.debug.print("cipher: activate CALIBRATE -> calibrated={}\n", .{vulkan_state.calibrated});
+            } else if (ui_context.focus_id == 2) {
+                std.debug.print("cipher: activate EXIT; closing\n", .{});
+                app.quit_requested = true;
+            }
+        }
+        if (demo_focus) |which| ui_context.focus_id = which; // labeled test-only injection
 
         ui_context.beginFrame(px, py, pdown);
 

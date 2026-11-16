@@ -56,6 +56,8 @@ pub const Layout = struct {
     }
 };
 
+const focus_order = [_]u32{ 1, 2 };
+
 pub const WidgetContext = struct {
     rects: std.ArrayList(RectCmd) = .empty,
     instances: std.ArrayList(atlas_mod.Instance) = .empty,
@@ -68,6 +70,7 @@ pub const WidgetContext = struct {
     // Interaction state machine (immediate mode).
     hover_id: u32 = 0,
     active_id: u32 = 0,
+    focus_id: u32 = 0,
     quit_requested: bool = false,
 
     // Assigned by the frame loop before any widget call.
@@ -83,11 +86,13 @@ pub const WidgetContext = struct {
     }
 
     fn addRect(self: *WidgetContext, rect: flexbox.Rect, fill: [4]f32, border: ?[4]f32) !void {
+        return self.addRectWidth(rect, fill, border, 1.0);
+    }
+
+    fn addRectWidth(self: *WidgetContext, rect: flexbox.Rect, fill: [4]f32, border: ?[4]f32, border_width: f32) !void {
         var border_color: [4]f32 = .{ 0, 0, 0, 0 };
-        var border_width: f32 = 0;
         if (border) |b| {
             border_color = b;
-            border_width = 1.0;
         }
         try self.rects.append(std.heap.page_allocator, .{
             .x = @floatCast(rect.x),
@@ -156,6 +161,16 @@ pub const WidgetContext = struct {
             self.active_id = 0;
         }
 
+        if (self.focus_id == id) {
+            const ring = flexbox.Rect{
+                .x = rect.x - 4.0,
+                .y = rect.y - 4.0,
+                .width = rect.width + 8.0,
+                .height = rect.height + 8.0,
+            };
+            try self.addRectWidth(ring, .{ 0, 0, 0, 0 }, BRASS, 2.0);
+        }
+
         const fill = if (active) BRASS else RAISED;
         const border = if (hovered or active) BRASS else LINE;
         try self.addRect(rect, fill, border);
@@ -175,6 +190,17 @@ pub const WidgetContext = struct {
         }
 
         return clicked;
+    }
+
+    /// Tab moves focus through the focusable set (wraps). No visible
+    /// focus = no keyboard accessibility; this is the minimum honest ring.
+    pub fn cycleFocus(self: *WidgetContext) void {
+        const order = focus_order;
+        var index: usize = 0;
+        while (index < order.len) : (index += 1) {
+            if (order[index] == self.focus_id) break;
+        }
+        self.focus_id = order[if (index < order.len) (index + 1) % order.len else 0];
     }
 
     /// Deterministic layout for the demo window: a bottom panel with
