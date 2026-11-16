@@ -9,6 +9,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    root_mod.link_libc = true;
 
     const exe = b.addExecutable(.{
         .name = "sifr",
@@ -37,6 +38,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        mod.link_libc = true;
         const tests = b.addTest(.{
             .root_module = mod,
         });

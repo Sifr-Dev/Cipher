@@ -1,21 +1,19 @@
-//! Verify Vulkan loader loads libvulkan.so.1 and resolves function pointers.
-//!
-//! Requires a working Vulkan ICD (NVIDIA or Mesa) installed.
+//! Verify Vulkan device creation works on live hardware via dlopen'd
+//! libvulkan.so.1 using std.c.dlopen/dlsym.
 const std = @import("std");
-const vk = @import("loader.zig");
 const vulkan_device = @import("device.zig");
 
 test "creates Vulkan device and enumerates physical devices" {
-    var vulkan = try vk.load();
-    defer vulkan.lib.close();
+    // Verifies Vulkan ICD integration. Requires a working Vulkan driver.
+    var vulkan = try vulkan_device.load();
+    defer _ = std.c.dlclose(vulkan.handle);
 
-    // Verify all key function pointers are resolved from libvulkan.so.1.
-    try std.testing.expect(@intFromPtr(@as(*const anyopaque, vulkan.vkCreateInstance)) != 0);
-    try std.testing.expect(@intFromPtr(@as(*const anyopaque, vulkan.vkEnumeratePhysicalDevices)) != 0);
-    try std.testing.expect(@intFromPtr(@as(*const anyopaque, vulkan.vkCreateDevice)) != 0);
-    try std.testing.expect(@intFromPtr(@as(*const anyopaque, vulkan.vkGetDeviceQueue)) != 0);
-    try std.testing.expect(@intFromPtr(@as(*const anyopaque, vulkan.vkDestroyDevice)) != 0);
-    try std.testing.expect(@intFromPtr(@as(*const anyopaque, vulkan.vkDestroyInstance)) != 0);
+    var device: vulkan_device.Device = undefined;
+    try vulkan_device.createDevice(&vulkan, &device);
+    defer vulkan.vkDestroyDevice(device.device, null);
+    defer vulkan.vkDestroyInstance(device.instance, null);
 
-    std.debug.print("Vulkan ICD symbols resolved\\n", .{});
+    try std.testing.expect(device.queue_family_index == 0);
+
+    std.debug.print("Vulkan device created: queue_family={d}\n", .{device.queue_family_index});
 }
