@@ -51,11 +51,13 @@ pub const Cursor = struct {
     }
 };
 
+
 pub const Event = struct {
     sender: u32 = 0,
     opcode: u16 = 0,
     buf: [MAX_MESSAGE]u8 = undefined,
     len: usize = 0,
+    fd: ?i32 = null,
 
     pub fn payload(self: *const Event) []const u8 {
         return self.buf[0..self.len];
@@ -63,6 +65,13 @@ pub const Event = struct {
 
     pub fn read32(self: *const Event, index: usize) u32 {
         return std.mem.readInt(u32, self.payload()[index * 4 ..][0..4], .little);
+    }
+
+    pub fn fixed24_8(self: *const Event, index: usize) f64 {
+        const raw = self.read32(index);
+        const whole: i32 = @bitCast(raw >> 8);
+        const frac: u8 = @truncate(raw);
+        return @as(f64, @floatFromInt(whole)) + @as(f64, @floatFromInt(frac)) / 256.0;
     }
 };
 
@@ -130,6 +139,10 @@ pub const ShmBuffer = struct {
 
 pub const Connection = struct {
     fd: i32,
+    recv_buf: [MAX_MESSAGE]u8 = undefined,
+    recv_len: usize = 0,
+    recv_pos: usize = 0,
+    pending_fd: ?i32 = null,
 
     pub fn connect(runtime_dir: []const u8, display: []const u8) !Connection {
         const path = try std.fmt.allocPrintSentinel(std.heap.page_allocator, "{s}/{s}", .{ runtime_dir, display }, 0);
@@ -198,17 +211,70 @@ pub const Connection = struct {
         if (@as(i64, @bitCast(rc)) < 0) return Error.WriteFailed;
     }
 
+    fn fill(self: *Connection) !void {
+        if (self.recv_pos > 0) {
+            const remaining = self.recv_len - self.recv_pos;
+            @memcpy(self.recv_buf[0..remaining], self.recv_buf[self.recv_pos..self.recv_len]);
+            self.recv_len = remaining;
+            self.recv_pos = 0;
+        }
+        if (self.recv_len >= self.recv_buf.len) return Error.ProtocolError;
+
+        var control: [128]u8 align(@alignOf(usize)) = undefined;
+        @memset(&control, 0);
+
+        var iov = [_]std.posix.iovec{.{
+            .base = self.recv_buf[self.recv_len..].ptr,
+            .len = self.recv_buf.len - self.recv_len,
+        }};
+        var msg = std.os.linux.msghdr{
+            .name = null,
+            .namelen = 0,
+            .iov = @ptrCast(&iov),
+            .iovlen = 1,
+            .control = &control,
+            .controllen = control.len,
+            .flags = 0,
+        };
+        const rc = std.os.linux.recvmsg(self.fd, @ptrCast(&msg), 0);
+        if (@as(i64, @bitCast(rc)) < 0) return Error.ReadFailed;
+        self.recv_len += @intCast(rc);
+
+        if (msg.controllen >= @sizeOf(std.os.linux.cmsghdr)) {
+            const cm: *align(@alignOf(usize)) std.os.linux.cmsghdr = @ptrCast(@alignCast(&control));
+            if (cm.level == std.os.linux.SOL.SOCKET and cm.type == std.os.linux.SCM.RIGHTS) {
+                self.pending_fd = std.mem.readInt(i32, control[@sizeOf(std.os.linux.cmsghdr)..][0..4], .little);
+            }
+        }
+    }
+
     pub fn recv(self: *Connection, event: *Event) !void {
-        var header: [HEADER]u8 = undefined;
-        try readExact(self.fd, &header);
-        event.sender = std.mem.readInt(u32, header[0..4], .little);
-        const size_opcode = std.mem.readInt(u32, header[4..8], .little);
+        event.* = undefined;
+        event.fd = null;
+
+        while (self.recv_len - self.recv_pos < HEADER) {
+            try self.fill();
+        }
+
+        const size_opcode = std.mem.readInt(u32, self.recv_buf[self.recv_pos + 4 ..][0..4], .little);
         const size = size_opcode >> 16;
-        event.opcode = @truncate(size_opcode);
+        if (size > MAX_MESSAGE) return Error.ProtocolError;
+
+        while (self.recv_len - self.recv_pos < size) {
+            try self.fill();
+        }
+
         const payload_len = size - HEADER;
-        if (payload_len > MAX_MESSAGE) return Error.ProtocolError;
-        try readExact(self.fd, event.buf[0..payload_len]);
+        const start = self.recv_pos;
+        @memcpy(event.buf[0..payload_len], self.recv_buf[start + HEADER .. start + size]);
+        event.sender = std.mem.readInt(u32, self.recv_buf[start..][0..4], .little);
+        event.opcode = @truncate(size_opcode);
         event.len = payload_len;
+        self.recv_pos += size;
+        if (self.pending_fd) |fdv| {
+            event.fd = fdv;
+            self.pending_fd = null;
+        }
     }
 };
 
@@ -221,14 +287,6 @@ fn writeAll(fd: i32, buffer: []const u8) !void {
     }
 }
 
-fn readExact(fd: i32, buffer: []u8) !void {
-    var read: usize = 0;
-    while (read < buffer.len) {
-        const rc = std.os.linux.read(fd, buffer[read..].ptr, buffer[read..].len);
-        if (@as(i64, @bitCast(rc)) < 0) return Error.ReadFailed;
-        read += @intCast(rc);
-    }
-}
 
 test "a payload round-trips u32 and strings through the wire" {
     var cursor = Cursor{};

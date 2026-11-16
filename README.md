@@ -8,12 +8,21 @@ Cipher is an original native Linux windowing and graphics framework, written fro
 
 ## What exists today
 
+Cipher is at the earliest vertical-slice stage, with every slice verified on a real compositor. Notable events:
+
+- The Wayland wire client is hand-marshaled end to end — no generated bindings, no GTK, no X11, no libc dependency beyond kernel syscalls.
+- The compositor answered with `wl_seat` (pointer + keyboard capabilities); the client created `wl_keyboard`/`wl_pointer`, received the 35,910-byte xkb keymap with its fd, closed the fd, and reports focus, keys, and pointer motion/buttons.
+- Frame pacing works through `wl_surface.frame` callbacks across 24 frames.
+- Input terminates the app cleanly: Escape (key code 1), `q` (key code 16), or a press on the brass center quit `main` through the normal commit/frame-callback path.
+
+Roadmap continues below.
+
 | Component | State |
 |---|---|
-| `src/wayland.zig` | Raw Wayland wire client: `wl_display` marshaling, `wl_registry`, `wl_compositor`, `wl_shm` (memfd + `SCM_RIGHTS`), `wl_surface`, `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` — hand-encoded from the upstream XML semantics |
+| `src/wayland.zig` | Raw Wayland wire client: `wl_display` marshaling, `wl_registry`, `wl_compositor`, `wl_shm` (memfd + `SCM_RIGHTS`), `wl_surface`, `wl_seat`/`wl_keyboard`/`wl_pointer` (keymap fd closed correctly), `xdg_wm_base`, `xdg_surface`, `xdg_toplevel` — hand-encoded from the upstream XML semantics. Receive path is a buffered `recvmsg` loop that survives coalesced messages |
 | `src/geometry.zig` | 24-cell cipher-ring geometry, unit-tested |
 | `src/render.zig` | CPU rasterizer for the SIFR ring; A8R8G8B8 pixels, PPM evidence dump |
-| `src/main.zig` | App lifecycle: connect → bind → configure → render/commit/frame-callback loop |
+| `src/main.zig` | App lifecycle: connect → bind → seat/keyboard/pointer → configure → render/commit/frame-callback loop |
 
 ## Requirements
 
@@ -40,7 +49,7 @@ No generated protocol bindings, no external crates/packages, no FFI to a toolkit
 ## Roadmap
 
 1. Wayland window + verified frame loop (done)
-2. Input: `wl_seat`/`wl_keyboard`/`wl_pointer` — actions and focus
+2. Input: `wl_seat`/`wl_keyboard`/`wl_pointer` — actions and focus (done)
 3. Software present path (current) and GPU present path via our own Vulkan/OpenGL loader
 4. Scene graph, render graph, batching, text (own TrueType reader, glyph atlas), layout (flexbox), motion
 5. `mobilis` terminal and `harmonis` music player built on Cipher

@@ -46,8 +46,15 @@ const Client = struct {
     frame_index: u32 = 0,
     globals_len: usize = 0,
     globals: [8]Global = undefined,
+    seat: ?u32 = null,
+    keyboard: ?u32 = null,
+    pointer: ?u32 = null,
+    quit_requested: bool = false,
+    pointer_x: f64 = -1,
+    pointer_y: f64 = -1,
+    keyboard_focused: bool = false,
 
-    const wanted = [_][]const u8{ "wl_compositor", "wl_shm", "xdg_wm_base" };
+    const wanted = [_][]const u8{ "wl_compositor", "wl_shm", "xdg_wm_base", "wl_seat" };
 
     fn rememberGlobal(self: *Client, name: u32, interface: []const u8, version: u32) void {
         for (wanted) |needle| {
@@ -98,6 +105,74 @@ const Client = struct {
             try self.connection.send(self.ids.wm_base.?, 3, &pong);
         }
 
+        if (self.seat != null and event.sender == self.seat.?) {
+            if (event.opcode == 0) {
+                const capabilities = event.read32(0);
+                std.debug.print("cipher: seat capabilities {d}\n", .{capabilities});
+            }
+        }
+
+        if (self.keyboard != null and event.sender == self.keyboard.?) {
+            switch (event.opcode) {
+                0 => {
+                    const size = event.read32(1);
+                    if (event.fd) |fdv| _ = std.os.linux.close(fdv);
+                    std.debug.print("cipher: keymap received (size {d}), fd closed\n", .{size});
+                },
+                1 => {
+                    self.keyboard_focused = true;
+                    std.debug.print("cipher: keyboard focus acquired\n", .{});
+                },
+                2 => {
+                    self.keyboard_focused = false;
+                    std.debug.print("cipher: keyboard focus lost\n", .{});
+                },
+                3 => {
+                    const key = event.read32(2);
+                    const state = event.read32(3);
+                    if (state == 1) {
+                        if (key == 1 or key == 16) {
+                            std.debug.print("cipher: quit key pressed\n", .{});
+                            self.quit_requested = true;
+                        } else {
+                            std.debug.print("cipher: key {d} pressed\n", .{key});
+                        }
+                    }
+                },
+                4 => {}, // modifiers: state tracked implicitly by the compositor for now
+                5 => {}, // repeat_info: rate/delay; handled by key repeat later
+                else => {},
+            }
+        }
+
+        if (self.pointer != null and event.sender == self.pointer.?) {
+            switch (event.opcode) {
+                0 => std.debug.print("cipher: pointer entered surface\n", .{}),
+                1 => {
+                    self.pointer_x = -1;
+                    self.pointer_y = -1;
+                },
+                2 => {
+                    self.pointer_x = event.fixed24_8(1);
+                    self.pointer_y = event.fixed24_8(2);
+                },
+                3 => {
+                    const button = event.read32(2);
+                    const state = event.read32(3);
+                    if (state == 1) {
+                        std.debug.print("cipher: button {d} pressed at ({d:.1}, {d:.1})\n", .{ button, self.pointer_x, self.pointer_y });
+                        const dx = self.pointer_x - @as(f64, WIDTH) / 2.0;
+                        const dy = self.pointer_y - @as(f64, HEIGHT) / 2.0;
+                        if (dx * dx + dy * dy <= 144.0) {
+                            std.debug.print("cipher: brass center clicked; closing\n", .{});
+                            self.quit_requested = true;
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
         return event;
     }
 
@@ -119,6 +194,9 @@ const Client = struct {
                 const interface = reader.str();
                 const version = reader.read32();
                 self.rememberGlobal(name, interface, version);
+                if (self.debug) {
+                    std.debug.print("global {d} {s} v{d}\n", .{ name, interface, version });
+                }
                 continue;
             }
             if (self.ids.sync_callback != null and event.sender == self.ids.sync_callback.? and event.opcode == 0) {
@@ -132,6 +210,7 @@ const Client = struct {
             .{ "wl_compositor", 4 },
             .{ "wl_shm", 1 },
             .{ "xdg_wm_base", 6 },
+            .{ "wl_seat", 5 },
         };
 
         inline for (binds) |entry| {
@@ -153,6 +232,10 @@ const Client = struct {
             if (std.mem.eql(u8, interface, "wl_compositor")) self.ids.compositor = object_id;
             if (std.mem.eql(u8, interface, "wl_shm")) self.ids.shm = object_id;
             if (std.mem.eql(u8, interface, "xdg_wm_base")) self.ids.wm_base = object_id;
+            if (std.mem.eql(u8, interface, "wl_seat")) {
+                self.ids.seat = object_id;
+                self.seat = object_id;
+            }
         }
     }
 
@@ -232,6 +315,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     try app.collectGlobals();
     try app.bindRequired();
+
+    const seat = app.seat orelse return wayland.Error.ProtocolError;
+    {
+        app.keyboard = app.ids.new();
+        var cursor = wayland.Cursor{};
+        cursor.writeU32(app.keyboard.?);
+        try app.connection.send(seat, 1, cursor.slice()); // get_keyboard
+    }
+    {
+        app.pointer = app.ids.new();
+        var cursor = wayland.Cursor{};
+        cursor.writeU32(app.pointer.?);
+        try app.connection.send(seat, 0, cursor.slice()); // get_pointer
+    }
     std.debug.print("cipher: bound wl_compositor={d} wl_shm={d} xdg_wm_base={d}\n", .{ app.ids.compositor.?, app.ids.shm.?, app.ids.wm_base.? });
 
     const surface_id = app.ids.new();
@@ -293,7 +390,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.debug.print("cipher: xdg toplevel configured (serial {d})\n", .{app.serial});
 
     const pixels_u32: []u32 = @ptrCast(@alignCast(shm.pixels));
-    while (app.frame_index < frame_count) : (app.frame_index += 1) {
+    while (app.frame_index < frame_count and !app.quit_requested) : (app.frame_index += 1) {
         render.render(pixels_u32, @as(f64, @floatFromInt(app.frame_index)) / 60.0);
 
         {
@@ -322,6 +419,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     // Teardown: destroy every client-created object we hold.
+    if (app.keyboard) |id| try app.connection.send(id, 0, &.{}); // wl_keyboard.release
+    if (app.pointer) |id| try app.connection.send(id, 1, &.{}); // wl_pointer.release
+    if (app.seat) |id| try app.connection.send(id, 3, &.{}); // wl_seat.release
     if (app.ids.toplevel) |id| try app.connection.send(id, 0, &.{}); // xdg_toplevel.destroy
     if (app.ids.xdg_surface) |id| try app.connection.send(id, 0, &.{}); // xdg_surface.destroy
     if (app.ids.buffer) |id| try app.connection.send(id, 0, &.{}); // wl_buffer.destroy
