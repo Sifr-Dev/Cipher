@@ -27,6 +27,9 @@ Roadmap continues below.
 | `src/geometry.zig` | 24-cell cipher-ring geometry, unit-tested |
 | `src/render.zig` | CPU rasterizer for the SIFR ring; A8R8G8B8 pixels, PPM evidence dump |
 | `src/vulkan_probe.zig` | Headless Vulkan probe, NVIDIA ICD (`zig build probe`) — PROBE_OK |
+| `src/font.zig` | From-zero SFNT reader: table directory, `head`/`maxp`/`hhea`/`hmtx`, `loca`, `cmap` (formats 4/12), glyph bounds — verified on bundled Instrument Sans and Geist Mono (SIL OFL 1.1; licenses in `assets/`) |
+| `src/outline.zig` | From-zero `glyf` reader: simple + composite outlines with 2×2/scale/xy-scale matrices and point-matching arguments |
+| `assets/` | Instrument Sans + Geist Mono, decompressed from the OFL-licensed fontsource variable fonts (`.ttf` committed; licenses included) |
 | `src/main.zig` | App lifecycle: connect → bind → seat/keyboard/pointer → configure → render/commit/frame-callback loop |
 
 ## Requirements
