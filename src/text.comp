@@ -1,0 +1,37 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0, rgba8) uniform image2D frame;
+layout(r8, set = 0, binding = 1) uniform readonly image2D atlas;
+layout(std430, set = 0, binding = 2) readonly buffer Glyphs { vec4 glyphs[]; };
+layout(push_constant) uniform Push {
+    vec4 color;
+    uint count;
+    uint frame_width;
+    uint frame_height;
+    uint cell;
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(frame);
+    if (any(greaterThanEqual(coord, size))) {
+        return;
+    }
+
+    vec4 src = imageLoad(frame, coord);
+    float coverage = 0.0;
+    for (uint i = 0; i < pc.count; ++i) {
+        vec4 rec = glyphs[i];
+        vec2 d = rec.xy;
+        vec2 fcoord = vec2(coord);
+        if (fcoord.x < d.x || fcoord.y < d.y) continue;
+        vec2 local = fcoord - d;
+        if (local.x >= float(pc.cell) || local.y >= float(pc.cell)) continue;
+        ivec2 at = ivec2(rec.zw) + ivec2(local);
+        float a = imageLoad(atlas, at).r;
+        coverage = max(coverage, a);
+    }
+
+    vec3 blended = mix(src.rgb, pc.color.rgb, coverage * pc.color.a);
+    imageStore(frame, coord, vec4(blended, src.a));
+}
