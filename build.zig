@@ -48,4 +48,36 @@ pub fn build(b: *std.Build) void {
     const probe_run = b.addRunArtifact(probe);
     probe_run.step.dependOn(b.getInstallStep());
     probe_step.dependOn(&probe_run.step);
+
+    const gpuframe_mod = b.createModule(.{
+        .root_source_file = b.path("src/gpuframe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const gpuframe = b.addExecutable(.{
+        .name = "gpuframe",
+        .root_module = gpuframe_mod,
+    });
+    b.installArtifact(gpuframe);
+    const gpuframe_step = b.step("gpuframe", "Run GPU-drawn SIFR frame on Wayland");
+    const gpuframe_run = b.addRunArtifact(gpuframe);
+    gpuframe_run.step.dependOn(b.getInstallStep());
+    gpuframe_step.dependOn(&gpuframe_run.step);
+
+    const probe3_mod = b.createModule(.{
+        .root_source_file = b.path("src/probe3.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const probe3 = b.addExecutable(.{
+        .name = "vkprobe3",
+        .root_module = probe3_mod,
+    });
+    b.installArtifact(probe3);
+    const probe3_step = b.step("probe3", "Run bare compute probe");
+    const probe3_run = b.addRunArtifact(probe3);
+    probe3_run.step.dependOn(b.getInstallStep());
+    probe3_step.dependOn(&probe3_run.step);
 }

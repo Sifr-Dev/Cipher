@@ -1,0 +1,42 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
+layout(push_constant) uniform Push { float time; } pc;
+
+const vec4 VOIDC  = vec4(4.0 / 255.0, 6.0 / 255.0, 11.0 / 255.0, 1.0);
+const vec4 LINEC  = vec4(45.0 / 255.0, 48.0 / 255.0, 56.0 / 255.0, 1.0);
+const vec4 TEXTC  = vec4(243.0 / 255.0, 247.0 / 255.0, 254.0 / 255.0, 1.0);
+const vec4 BRASSC = vec4(234.0 / 255.0, 180.0 / 255.0, 68.0 / 255.0, 1.0);
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(img);
+    if (any(greaterThanEqual(coord, size))) {
+        return;
+    }
+
+    vec2 p = vec2(coord);
+    vec2 c = vec2(size) * 0.5;
+    vec4 col = VOIDC;
+
+    float dc = length(p - c);
+    if (abs(dc - 140.0) < 1.0 || abs(dc - 96.0) < 1.0 || abs(dc - 52.0) < 1.0) {
+        col = LINEC;
+    }
+
+    float spin = sin(pc.time * 0.4) * 6.0;
+    for (int i = 0; i < 24; ++i) {
+        float angle = float(i) * 0.2617993877991494 - 1.5707963267948966;
+        vec2 cc = vec2(c.x + cos(angle) * 140.0 + spin, c.y + sin(angle) * 140.0);
+        float radius = (i == 0) ? 9.0 : 6.0;
+        if (length(p - cc) <= radius) {
+            col = (i == 0) ? BRASSC : TEXTC;
+        }
+    }
+
+    if (length(p - c) <= 12.0) {
+        col = BRASSC;
+    }
+
+    imageStore(img, coord, col);
+}

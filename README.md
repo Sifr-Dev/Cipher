@@ -10,6 +10,9 @@ Cipher is an original native Linux windowing and graphics framework, written fro
 
 Cipher is at the earliest vertical-slice stage, with every slice verified on a real compositor/GPU driver. Notable events:
 
+- **GPU-drawn frame, verified (2026-11-16).** `zig build && ./zig-out/bin/gpuframe` dispatches a real compute shader (`src/ring.comp`, ours) that rasterizes the SIFR ring on the NVIDIA ICD, copies the result into host-visible memory, and presents it through Cipher's own Wayland wire client on `wayland-0` — exit 0, `WAYLAND_PROTOCOL_OK frames=24`, and the frame dump (`/tmp/opencode/gpuframe.ppm`) shows the correct identity: void background, hairline circles, 23 bone cells, 1 brass index at 12 o'clock, brass center dot — all computed on the GPU.
+- **Root cause found of the "silent black image" bug class:** a `VkBufferImageCopy` was carrying a 20-byte `VkSubresourceRange` where the spec requires a 16-byte `VkSubresourceLayers` — every image command with that payload silently produced no pixels while all `vk*CommandBuffer*rc=0`. Fixed by introducing `VkSubresourceLayers`; verified with a minimal 8×8 probe that image→buffer roundtrip, clear, and dispatch→image→copy all return correct bytes.
+
 - **Headless Vulkan probe (`zig build probe`) PASSED on the NVIDIA ICD** with only `libvulkan.so.1` dlopen'd by our binary: instance → physical device `NVIDIA GeForce RTX 4060 Laptop GPU` (vendor `10de`, api `404165`) → logical device + queue (family 0) → command pool + buffer → 640×400 `R8G8B8A8_UNORM` image allocated and bound → host-visible, host-coherent 1 MB staging buffer allocated and bound. End to end in 241 ms.
 - The Wayland wire client is hand-marshaled end to end — no generated bindings, no GTK, no X11, no libc-linked GPU stack. The probe links libc only so `std.DynLib` can route through `dlopen` (the zero-runtime ELF loader has no relocations; calling ICD functions through it crashes confirmed by experiment).
 - The compositor answered with `wl_seat` (pointer + keyboard capabilities); the client created `wl_keyboard`/`wl_pointer`, received the 35,910-byte xkb keymap with its fd, closed the fd, and reports focus, keys, and pointer motion/buttons.
@@ -53,7 +56,7 @@ No generated protocol bindings, no external crates/packages, no FFI to a toolkit
 - [x] Wayland window + verified frame loop on `wayland-0` (commit/configure/frame pacing)
 - [x] Input: `wl_seat`/`wl_keyboard`/`wl_pointer` — focus, key handling, clean quit (verified live)
 - [x] Headless Vulkan probe against the NVIDIA ICD — device, queue, image, host-visible buffer (verified, 2026-11-16, `PROBE_OK`)
-- [ ] GPU-drawn SIFR ring (compute shader) copied to host-visible memory → wl_shm present
+- [x] GPU-drawn SIFR ring (compute shader) → host-visible memory → wl_shm present
 - [ ] Scene graph, render graph, batching
 - [ ] Text (own TrueType reader, glyph atlas), flexbox layout, motion
 - [ ] `mobilis` terminal and `harmonis` music player built on Cipher
