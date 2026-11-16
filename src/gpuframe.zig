@@ -13,6 +13,7 @@ const wayland = @import("wayland.zig");
 const geometry = @import("geometry.zig");
 const font_mod = @import("font.zig");
 const atlas_mod = @import("atlas.zig");
+const textlayout_mod = @import("textlayout.zig");
 const Instance = atlas_mod.Instance;
 
 const WIDTH = 640;
@@ -600,6 +601,7 @@ const State = struct {
     glyph_mapped: ?[*]Instance = null,
     font_bytes: []const u8 = &.{},
     font_parsed: font_mod.Font = undefined,
+    caption_split: u32 = 0,
 
     fn destroy(self: *State) void {
         _ = self.vk.vkDestroyDevice(self.device, null);
@@ -814,6 +816,7 @@ const TextPush = extern struct {
     g: f32,
     b: f32,
     a: f32,
+    first_glyph: u32,
     count: u32,
     frame_width: u32,
     frame_height: u32,
@@ -1056,7 +1059,7 @@ fn createAtlasAndText(state: *State) !void {
     if (state.vk.vkQueueWaitIdle(state.queue) != VK_SUCCESS) return error.AtlasUploadWaitIdleFailed;
 
     // Glyph instance SSBO: 16 slots of 16-byte Instance, persistently mapped.
-    const glyph_buffer_size: u64 = 16 * @sizeOf(Instance);
+    const glyph_buffer_size: u64 = 32 * @sizeOf(Instance);
     const glyph_info = VkBufferCreateInfo{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = null,
@@ -1343,7 +1346,7 @@ fn createTextPipeline(state: *State) !void {
     const glyph_buffer_info = VkDescriptorBufferInfo{
         .buffer = state.glyph_buffer,
         .offset = 0,
-        .range = 16 * @sizeOf(Instance),
+        .range = 32 * @sizeOf(Instance),
     };
     const writes = [_]VkWriteDescriptorSet{
         .{
@@ -1430,27 +1433,27 @@ fn createTextPipeline(state: *State) !void {
 
 fn writeGlyphInstances(state: *State) !u32 {
     const allocator = std.heap.page_allocator;
-    const scale = @as(f64, @floatFromInt(atlas_mod.PX_EM)) / @as(f64, @floatFromInt(state.font_parsed.head.units_per_em));
-    const text = "SIFR";
-    // Widths for S, I, F, R in Instrument Sans (units) * scale = pixel width.
-    var text_width: f64 = 0;
-    var index: usize = 0;
-    while (index < text.len) : (index += 1) {
-        const glyph = state.font_parsed.cmapGlyph(text[index]) orelse 0;
-        text_width += @as(f64, @floatFromInt(state.font_parsed.glyphAdvance(glyph))) * scale;
-    }
-    const pen_x = (@as(f64, @floatFromInt(WIDTH)) - text_width) / 2.0;
-    const baseline_y: f64 = @as(f64, HEIGHT) - 24.0;
-
-    const instances = try atlas_mod.Atlas.instancesFor(&state.font_parsed, allocator, text, pen_x, baseline_y);
-    defer allocator.free(instances);
-
     const mapped = state.glyph_mapped orelse return error.GlyphBufferNotMapped;
-    const count: u32 = @intCast(instances.len);
-    for (0..instances.len) |i| {
-        mapped[i] = instances[i];
+
+    // Tagline above the ring (bone) and the wordmark below it (brass),
+    // both laid out by the from-zero layout engine.
+    var tagline = try textlayout_mod.layout(&state.font_parsed, allocator, "BUILT FROM ZERO", 0, 20.0, @floatFromInt(WIDTH), .center);
+    defer tagline.deinit();
+    var wordmark = try textlayout_mod.layout(&state.font_parsed, allocator, "SIFR", 0, @as(f64, @floatFromInt(HEIGHT)) - 64.0, @floatFromInt(WIDTH), .center);
+    defer wordmark.deinit();
+
+    var index: usize = 0;
+    for (tagline.instances) |instance| {
+        mapped[index] = instance;
+        index += 1;
     }
-    return count;
+    const tagline_count: u32 = @intCast(index);
+    for (wordmark.instances) |instance| {
+        mapped[index] = instance;
+        index += 1;
+    }
+    state.caption_split = tagline_count;
+    return @intCast(index);
 }
 
 fn recordFrame(state: *State, time: f32) !void {
@@ -1470,20 +1473,37 @@ fn recordFrame(state: *State, time: f32) !void {
     state.vk.vkCmdDispatch(cmd, WIDTH / 8, HEIGHT / 8, 1);
 
     const glyph_count = writeGlyphInstances(state) catch 0;
-    if (glyph_count > 0) {
+    const split = state.caption_split;
+    if (glyph_count > 0 and split > 0 and glyph_count > split) {
         state.vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, state.text_pipeline);
         state.vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, state.text_pipeline_layout, 0, 1, @ptrCast(&state.text_descriptor_set), 0, null);
-        const push = TextPush{
-            .r = 0.918,
-            .g = 0.706,
-            .b = 0.267,
+
+        const tagline_push = TextPush{
+            .r = 0.953,
+            .g = 0.969,
+            .b = 0.996,
             .a = 1.0,
-            .count = glyph_count,
+            .first_glyph = 0,
+            .count = split,
             .frame_width = WIDTH,
             .frame_height = HEIGHT,
             .cell = @intCast(atlas_mod.CELL),
         };
-        state.vk.vkCmdPushConstants(cmd, state.text_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(TextPush), @ptrCast(&push));
+        state.vk.vkCmdPushConstants(cmd, state.text_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(TextPush), @ptrCast(&tagline_push));
+        state.vk.vkCmdDispatch(cmd, WIDTH / 8, HEIGHT / 8, 1);
+
+        const wordmark_push = TextPush{
+            .r = 0.918,
+            .g = 0.706,
+            .b = 0.267,
+            .a = 1.0,
+            .first_glyph = split,
+            .count = glyph_count - split,
+            .frame_width = WIDTH,
+            .frame_height = HEIGHT,
+            .cell = @intCast(atlas_mod.CELL),
+        };
+        state.vk.vkCmdPushConstants(cmd, state.text_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, @sizeOf(TextPush), @ptrCast(&wordmark_push));
         state.vk.vkCmdDispatch(cmd, WIDTH / 8, HEIGHT / 8, 1);
     }
 

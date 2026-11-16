@@ -30,8 +30,25 @@ pub fn build(b: *std.Build) void {
         .root_module = geo_mod,
     });
     const run_geo_tests = b.addRunArtifact(geo_tests);
-    const test_step = b.step("test", "Run geometry unit tests");
+    const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_geo_tests.step);
+
+    inline for (.{
+        .{ "src/rasterize.zig", "rasterize_tests" },
+        .{ "src/flexbox.zig", "flexbox_tests" },
+        .{ "src/textlayout.zig", "textlayout_tests" },
+    }) |case| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path(case[0]),
+            .target = target,
+            .optimize = optimize,
+        });
+        const tests = b.addTest(.{
+            .root_module = mod,
+        });
+        const run_tests = b.addRunArtifact(tests);
+        test_step.dependOn(&run_tests.step);
+    }
 
     const probe_mod = b.createModule(.{
         .root_source_file = b.path("src/vulkan_probe.zig"),

@@ -5,6 +5,7 @@ layout(r8, set = 0, binding = 1) uniform readonly image2D atlas;
 layout(std430, set = 0, binding = 2) readonly buffer Glyphs { vec4 glyphs[]; };
 layout(push_constant) uniform Push {
     vec4 color;
+    uint first_glyph;
     uint count;
     uint frame_width;
     uint frame_height;
@@ -20,7 +21,8 @@ void main() {
 
     vec4 src = imageLoad(frame, coord);
     float coverage = 0.0;
-    for (uint i = 0; i < pc.count; ++i) {
+    uint last = pc.first_glyph + pc.count;
+    for (uint i = pc.first_glyph; i < last; ++i) {
         vec4 rec = glyphs[i];
         vec2 d = rec.xy;
         vec2 fcoord = vec2(coord);
