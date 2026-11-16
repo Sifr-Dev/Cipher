@@ -28,6 +28,8 @@ pub fn build(b: *std.Build) void {
         .{ "src/os/linux/wayland/client.zig", "wayland_client" },
         .{ "src/gpu/vulkan/loader.zig", "vulkan_loader" },
         .{ "src/gpu/vulkan/loader_test.zig", "vulkan_loader_test" },
+        .{ "src/gpu/vulkan/device.zig", "vulkan_device" },
+        .{ "src/gpu/vulkan/device_test.zig", "vulkan_device_test" },
     };
     inline for (units) |unit| {
         const mod = b.createModule(.{
