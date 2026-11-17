@@ -64,6 +64,7 @@ pub fn build(b: *std.Build) void {
         .{ "src/ui/text/text_test.zig", "text_test" },
         .{ "src/ui_shim.zig", "ui_shim" },
         .{ "src/framework_shim.zig", "framework_shim" },
+        .{ "src/term_shim.zig", "term_shim" },
         .{ "src/gpu/vulkan/text.zig", "vulkan_text" },
         .{ "src/gpu_text_test.zig", "gpu_text_test" },
     };
