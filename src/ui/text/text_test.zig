@@ -216,3 +216,24 @@ test "glyphSafe: unmapped/astral codepoints never error, layout survives" {
     try a.drawText(&fb, 256, 64, 4, 40, "A\u{0F0000}B", 0xFFE8ECF4);
     std.debug.print("TEXT_GLYPHSAFE_OK measure={d:.1}\n", .{w});
 }
+
+test "font fallback: math glyph missing from primary rasterizes from fallback" {
+    const alloc = std.testing.allocator;
+    const prim = try readFile("/usr/share/fonts/liberation/LiberationSans-Regular.ttf", alloc);
+    defer alloc.free(prim);
+    const math = try readFile("/usr/share/fonts/TTF/DejaVuMathTeXGyre.ttf", alloc);
+    defer alloc.free(math);
+    // sanity: primary really lacks U+2208, fallback has it
+    const pf = try font.Font.load(prim);
+    const mf = try font.Font.load(math);
+    try std.testing.expectEqual(@as(u16, 0), try pf.glyphIndex(0x2208));
+    try std.testing.expect((try mf.glyphIndex(0x2208)) != 0);
+    var a = try atlas_mod.TextAtlas.init(alloc, prim, 24);
+    defer a.deinit();
+    // atlas with fallback: real ink from the math font, same texture
+    try a.addFallback(math);
+    const with_fb = try a.glyph(0x2208);
+    try std.testing.expect(with_fb.w > 4);
+    try std.testing.expect(with_fb.h > 4);
+    std.debug.print("TEXT_FALLBACK_OK U+2208 w={d} h={d} adv={d:.2}\n", .{ with_fb.w, with_fb.h, with_fb.advance });
+}

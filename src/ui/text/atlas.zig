@@ -15,12 +15,21 @@ pub const GlyphInfo = struct {
     advance: f32, // px pen advance
 };
 
+const FontEntry = struct {
+    f: font.Font,
+    scale: f32,
+};
+
 pub const TextAtlas = struct {
     allocator: std.mem.Allocator,
     font: font.Font,
     font_data: []const u8,
     px_size: f32,
     scale: f32,
+    /// Additional fonts tried (in order) when the primary font maps a
+    /// codepoint to .notdef. Glyphs rasterize into the SAME atlas/texture,
+    /// so the GPU path needs no changes.
+    fallbacks: std.ArrayList(FontEntry) = .empty,
 
     atlas: []u8,
     atlas_w: u32,
@@ -57,7 +66,17 @@ pub const TextAtlas = struct {
         };
     }
 
+    /// Register a fallback font (its SFNT data must outlive the atlas).
+    pub fn addFallback(self: *TextAtlas, font_data: []const u8) !void {
+        const f = try font.Font.load(font_data);
+        try self.fallbacks.append(self.allocator, .{
+            .f = f,
+            .scale = self.px_size / @as(f32, @floatFromInt(f.units_per_em)),
+        });
+    }
+
     pub fn deinit(self: *TextAtlas) void {
+        self.fallbacks.deinit(self.allocator);
         self.cache.deinit();
         self.allocator.free(self.atlas);
     }
@@ -82,9 +101,22 @@ pub const TextAtlas = struct {
     /// Get (rasterizing and packing on miss) the atlas entry for a codepoint.
     pub fn glyph(self: *TextAtlas, cp: u32) !GlyphInfo {
         if (self.cache.get(cp)) |g| return g;
-        const gid = try self.font.glyphIndex(cp);
-        const advance_units = try self.font.advanceWidth(gid);
-        const advance_px = @as(f32, @floatFromInt(advance_units)) * self.scale;
+        var active_font = &self.font;
+        var active_scale = self.scale;
+        var gid = try self.font.glyphIndex(cp);
+        if (gid == 0) {
+            for (self.fallbacks.items) |*fe| {
+                const fgid = fe.f.glyphIndex(cp) catch 0;
+                if (fgid != 0) {
+                    active_font = &fe.f;
+                    active_scale = fe.scale;
+                    gid = fgid;
+                    break;
+                }
+            }
+        }
+        const advance_units = try active_font.advanceWidth(gid);
+        const advance_px = @as(f32, @floatFromInt(advance_units)) * active_scale;
         var info = GlyphInfo{
             .atlas_x = 0,
             .atlas_y = 0,
@@ -94,19 +126,19 @@ pub const TextAtlas = struct {
             .top = 0,
             .advance = advance_px,
         };
-        var outline = try self.font.outline(gid, self.allocator);
+        var outline = try active_font.outline(gid, self.allocator);
         defer outline.deinit(self.allocator);
         if (outline.contours.len > 0 and outline.x_max > outline.x_min and outline.y_max > outline.y_min) {
-            const gw = @ceil(@as(f32, @floatFromInt(outline.x_max - outline.x_min)) * self.scale) + 2;
-            const gh = @ceil(@as(f32, @floatFromInt(outline.y_max - outline.y_min)) * self.scale) + 2;
+            const gw = @ceil(@as(f32, @floatFromInt(outline.x_max - outline.x_min)) * active_scale) + 2;
+            const gh = @ceil(@as(f32, @floatFromInt(outline.y_max - outline.y_min)) * active_scale) + 2;
             const w: u32 = @intFromFloat(gw);
             const h: u32 = @intFromFloat(gh);
             // rasterize tight: font (x_min, y_max) -> pixel (1, 1)
             const segs = try raster.flatten(
                 outline.contours,
-                self.scale,
-                1 - @as(f32, @floatFromInt(outline.x_min)) * self.scale,
-                1 + @as(f32, @floatFromInt(outline.y_max)) * self.scale,
+                active_scale,
+                1 - @as(f32, @floatFromInt(outline.x_min)) * active_scale,
+                1 + @as(f32, @floatFromInt(outline.y_max)) * active_scale,
                 self.allocator,
             );
             defer self.allocator.free(segs);
@@ -125,8 +157,8 @@ pub const TextAtlas = struct {
             info.atlas_y = self.shelf_y;
             info.w = w;
             info.h = h;
-            info.bearing_x = @as(f32, @floatFromInt(outline.x_min)) * self.scale;
-            info.top = @as(f32, @floatFromInt(outline.y_max)) * self.scale;
+            info.bearing_x = @as(f32, @floatFromInt(outline.x_min)) * active_scale;
+            info.top = @as(f32, @floatFromInt(outline.y_max)) * active_scale;
             for (0..h) |row| {
                 const src = cov[row * w ..][0..w];
                 const dst = self.atlas[@as(usize, self.shelf_y + @as(u32, @intCast(row))) * self.atlas_w + self.shelf_x ..][0..w];
