@@ -9,7 +9,7 @@ const pa_sample_spec = extern struct {
     channels: u8,
 };
 
-const PA_STREAM_PLAYBACK: i32 = 0;
+const PA_STREAM_PLAYBACK: i32 = 1;
 const PA_SAMPLE_S16LE: i32 = 3;
 
 pub const Pulse = struct {
