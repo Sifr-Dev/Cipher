@@ -322,7 +322,8 @@ pub const Runtime = struct {
         try self.makeShmObjects();
 
         // GPU + font + UI (all optional; software fallback presents clear color).
-        if (device.load()) |v| {
+        const force_sw = std.c.getenv("CIPHER_FORCE_SOFTWARE") != null;
+        if (!force_sw) if (device.load()) |v| {
             self.vk = v;
             if (device.createDevice(&self.vk, &self.dev)) {
                 self.vk_loaded = true;
@@ -792,9 +793,13 @@ pub const Runtime = struct {
             }
             self.mouse_pressed = false;
         } else {
-            // Software fallback: clear to void.
+            // Software fallback: clear to void, but still run the app's frame
+            // logic so socket pumps/timers/benchmarks keep working and the
+            // compositor keeps receiving vsync-synced commits.
             const px: []u32 = @ptrCast(@alignCast(self.shm_buf.pixels));
             for (px[0 .. self.width * self.height]) |*p| p.* = 0xFF04060B;
+            app.onFrame(app.ptr, self) catch {};
+            self.mouse_pressed = false;
         }
         self.pending_events.clearRetainingCapacity();
         _ = self.events_arena.reset(.free_all);
