@@ -193,3 +193,84 @@ test "tabs: click selects tab" {
     try std.testing.expectEqual(@as(i32, 2), sel);
     std.debug.print("WIDGET_TABS_OK sel=2\n", .{});
 }
+
+test "focus: Tab cycles buttons, Enter activates, ring appears only after Tab" {
+    const s = try setup();
+    defer std.testing.allocator.free(s.data);
+    defer std.testing.allocator.destroy(s.ui);
+    defer s.ui.deinit();
+    defer std.testing.allocator.destroy(s.at);
+    defer s.at.deinit();
+    const ui = s.ui;
+
+    // frame 1 (no events): first button owns focus; Enter activates it
+    try ui.begin(400, 300, 0, 0, false, false);
+    const b1 = try ui.button("Alpha");
+    const b2 = try ui.button("Beta");
+    try ui.end();
+    const cmds_no_tab = ui.drawCmds().len;
+    try std.testing.expect(!b1);
+    try std.testing.expect(!b2);
+
+    const ev_enter = [_]input.Event{ keyEvent(28, true) };
+    const ev_tab = [_]input.Event{ keyEvent(15, true) };
+    const ev_none = [_]input.Event{};
+    ui.events = &ev_enter;
+    try ui.begin(400, 300, 0, 0, false, false);
+    const a1 = try ui.button("Alpha");
+    const a2 = try ui.button("Beta");
+    try ui.end();
+    try std.testing.expect(a1);
+    try std.testing.expect(!a2);
+    try std.testing.expect(ui.kb_focus_id == 1); // first button
+
+    // frame: press Tab -> focus moves to button 2 (pos 1), ring becomes visible
+    ui.events = &ev_tab;
+    try ui.begin(400, 300, 0, 0, false, false);
+    _ = try ui.button("Alpha");
+    _ = try ui.button("Beta");
+    try ui.end();
+    try std.testing.expectEqual(@as(u32, 1), ui.focus_index);
+    try std.testing.expect(ui.kb_visible);
+
+    // frame: Enter now activates only button 2
+    ui.events = &ev_enter;
+    try ui.begin(400, 300, 0, 0, false, false);
+    const c1 = try ui.button("Alpha");
+    const c2 = try ui.button("Beta");
+    try ui.end();
+    try std.testing.expect(!c1);
+    try std.testing.expect(c2);
+    try std.testing.expectEqual(@as(u32, 2), ui.kb_focus_id);
+
+    // ring persists once visible (focus-visible latched): frame-1 count + 4 ring rects
+    ui.events = &ev_none;
+    try ui.begin(400, 300, 0, 0, false, false);
+    _ = try ui.button("Alpha");
+    _ = try ui.button("Beta");
+    try ui.end();
+    try std.testing.expectEqual(cmds_no_tab + 4, ui.drawCmds().len);
+    std.debug.print("WIDGET_FOCUS_OK tab cycle + enter + ring-visibility\n", .{});
+}
+
+test "focus: Shift-Tab wraps to the last focusable" {
+    const s = try setup();
+    defer std.testing.allocator.free(s.data);
+    defer std.testing.allocator.destroy(s.ui);
+    defer s.ui.deinit();
+    defer std.testing.allocator.destroy(s.at);
+    defer s.at.deinit();
+    const ui = s.ui;
+
+    // shift-tab on the very first widget wraps to the last
+    const ev_shifttab = [_]input.Event{.{ .key = .{ .code = 15, .key = .tab, .char = 0x09, .mods = .{ .raw = 0x1 }, .pressed = true } }};
+    ui.events = &ev_shifttab;
+    try ui.begin(400, 300, 0, 0, false, false);
+    _ = try ui.button("One");
+    _ = try ui.button("Two");
+    _ = try ui.button("Three");
+    try ui.end();
+    try std.testing.expectEqual(@as(u32, 2), ui.focus_index);
+    try std.testing.expect(ui.kb_visible);
+    std.debug.print("WIDGET_FOCUS_SHIFT_OK wrapped to last\n", .{});
+}

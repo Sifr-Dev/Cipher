@@ -30,8 +30,18 @@ pub fn slider(ui: *ui_mod.Ui, w: f32, min: f32, max: f32, value: *f32) !void {
     n.h = .{ .fixed = 24 };
     try ui.current().addChild(ui.allocator(), n);
 
+    const kb = ui.beginFocusable(id);
     const prev = ui.prev_rects.get(id) orelse zero_rect;
-    if (ui.mouse_pressed and prev.contains(ui.mouse_x, ui.mouse_y)) ui.active = id;
+    if (ui.mouse_pressed and prev.contains(ui.mouse_x, ui.mouse_y)) {
+        ui.active = id;
+        ui.focus_index = kb.pos;
+    }
+    if (kb.focused) {
+        const mult: f32 = if (ui.kb_shift) 10 else 1;
+        const step = (max - min) / 100.0 * mult;
+        if (ui.kb_arrow_left) st.slider = @max(min, st.slider - step);
+        if (ui.kb_arrow_right) st.slider = @min(max, st.slider + step);
+    }
     if (ui.active == id and ui.mouse_down and prev.w > 0) {
         const frac = std.math.clamp((ui.mouse_x - prev.x) / prev.w, 0.0, 1.0);
         st.slider = min + frac * (max - min);
@@ -60,9 +70,15 @@ pub fn checkbox(ui: *ui_mod.Ui, label: []const u8, value: *bool) !bool {
     n.w = .{ .fixed = 18 };
     n.h = .{ .fixed = 18 };
     try ui.current().addChild(ui.allocator(), n);
+    const kb = ui.beginFocusable(id);
     const prev = ui.prev_rects.get(id) orelse zero_rect;
     var toggled = false;
     if (ui.mouse_pressed and prev.contains(ui.mouse_x, ui.mouse_y)) {
+        st.checkbox = !st.checkbox;
+        toggled = true;
+        ui.focus_index = kb.pos;
+    }
+    if (kb.focused and ui.activate_pressed) {
         st.checkbox = !st.checkbox;
         toggled = true;
     }
@@ -91,6 +107,12 @@ pub fn listView(ui: *ui_mod.Ui, w: f32, rows: u32, items: []const []const u8, se
     n.h = .{ .fixed = lh * @as(f32, @floatFromInt(rows)) + 4 };
     try ui.current().addChild(ui.allocator(), n);
 
+    const kb = ui.beginFocusable(id);
+    if (kb.focused) {
+        const last: i32 = @intCast(items.len -| 1);
+        if (ui.kb_arrow_up) st.list.sel = @max(0, st.list.sel - 1);
+        if (ui.kb_arrow_down) st.list.sel = @min(last, st.list.sel + 1);
+    }
     const prev = ui.prev_rects.get(id) orelse zero_rect;
     if (prev.w > 0) {
         // wheel scroll when hovered
@@ -99,6 +121,7 @@ pub fn listView(ui: *ui_mod.Ui, w: f32, rows: u32, items: []const []const u8, se
                 if (e == .wheel and e.wheel.dy != 0) st.list.scroll -= e.wheel.dy * lh;
             }
         }
+        if (ui.mouse_pressed and prev.contains(ui.mouse_x, ui.mouse_y)) ui.focus_index = kb.pos;
         const max_scroll = @max(0, @as(f32, @floatFromInt(items.len)) * lh - (prev.h - 4));
         st.list.scroll = std.math.clamp(st.list.scroll, 0, max_scroll);
         // click a row
@@ -140,11 +163,15 @@ pub fn textInput(ui: *ui_mod.Ui, w: f32, buf: []u8, hint: []const u8) ![]u8 {
     n.h = .{ .fixed = lineH(ui) + 10 };
     try ui.current().addChild(ui.allocator(), n);
 
+    const kb = ui.beginFocusable(id);
     const prev = ui.prev_rects.get(id) orelse zero_rect;
     if (ui.mouse_pressed) {
-        if (prev.contains(ui.mouse_x, ui.mouse_y)) ui.active = id else if (ui.active == id) ui.active = 0;
+        if (prev.contains(ui.mouse_x, ui.mouse_y)) {
+            ui.active = id;
+            ui.focus_index = kb.pos;
+        } else if (ui.active == id) ui.active = 0;
     }
-    const focused = ui.active == id;
+    const focused = ui.active == id or kb.focused;
     if (focused) {
         for (ui.events) |e| {
             switch (e) {
@@ -228,6 +255,12 @@ pub fn tabs(ui: *ui_mod.Ui, labels: []const []const u8, sel: *i32) !void {
     n.h = .{ .fixed = lineH(ui) + 10 };
     n.w = .fit;
     try ui.current().addChild(ui.allocator(), n);
+    const kb = ui.beginFocusable(base_id);
+    if (kb.focused) {
+        const last: i32 = @intCast(labels.len -| 1);
+        if (ui.kb_arrow_left and st.tabs > 0) st.tabs -= 1;
+        if (ui.kb_arrow_right and st.tabs < last) st.tabs += 1;
+    }
     for (labels, 0..) |lab, i| {
         const tid = base_id + 1 + @as(u32, @intCast(i));
         const tn = try ui.newNode();
@@ -236,7 +269,10 @@ pub fn tabs(ui: *ui_mod.Ui, labels: []const []const u8, sel: *i32) !void {
         tn.h = .{ .fixed = lineH(ui) + 10 };
         try n.addChild(ui.allocator(), tn);
         const prev = ui.prev_rects.get(tid) orelse zero_rect;
-        if (ui.mouse_pressed and prev.contains(ui.mouse_x, ui.mouse_y)) st.tabs = @intCast(i);
+        if (ui.mouse_pressed and prev.contains(ui.mouse_x, ui.mouse_y)) {
+            st.tabs = @intCast(i);
+            ui.focus_index = kb.pos;
+        }
         if (prev.w > 0) {
             const active = st.tabs == @as(i32, @intCast(i));
             try ui.addRect(prev, if (active) C.COLOR_BUTTON_ACTIVE else C.COLOR_BUTTON);

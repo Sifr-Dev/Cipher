@@ -21,6 +21,7 @@ pub const COLOR_BUTTON_HOT: u32 = 0xFF1C2434;
 pub const COLOR_BUTTON_ACTIVE: u32 = 0xFF659EFF;
 pub const COLOR_TEXT: u32 = 0xFFE8ECF4;
 pub const COLOR_TEXT_DIM: u32 = 0xFF8A93A6;
+pub const COLOR_FOCUS_RING: u32 = 0xFF659EFF; // accent — keyboard focus indicator
 
 pub const Ui = struct {
     arena: std.heap.ArenaAllocator,
@@ -41,6 +42,23 @@ pub const Ui = struct {
     prev_rects: std.AutoHashMap(u32, layout.Rect), // survives frame arena resets
     events: []const input.Event = &.{}, // input events from the last event drain
     states: std.ArrayList(StateEntry), // persistent per-widget state (small N, linear scan)
+    // Keyboard focus model (immediate-mode): each focusable widget claims a
+    // position in declaration order per frame; focus_index names the position
+    // that owns focus. Tab presses are applied at end() (one frame lag, same
+    // convention as prev_rects hit testing). kb_focus_id feeds the focus ring.
+    focus_index: u32 = 0,
+    focus_cursor: u32 = 0,
+    kb_focus_id: u32 = 0,
+    pending_tab: i32 = 0,
+    activate_pressed: bool = false,
+    kb_arrow_left: bool = false,
+    kb_arrow_right: bool = false,
+    kb_arrow_up: bool = false,
+    kb_arrow_down: bool = false,
+    kb_shift: bool = false,
+    // Focus-visible behavior: the ring only shows after the user presses Tab
+    // (keyboard semantics), never after mouse use. Matches toolkit focus-visible.
+    kb_visible: bool = false,
 
     pub const WidgetState = union(enum) {
         slider: f32,
@@ -117,6 +135,31 @@ pub const Ui = struct {
         self.cmds = .empty;
         self.hot = 0;
         self.next_id = 1;
+        self.focus_cursor = 0;
+        self.kb_focus_id = 0;
+        self.pending_tab = 0;
+        self.activate_pressed = false;
+        self.kb_arrow_left = false;
+        self.kb_arrow_right = false;
+        self.kb_arrow_up = false;
+        self.kb_arrow_down = false;
+        self.kb_shift = false;
+        for (self.events) |ev| switch (ev) {
+            .key => |k| {
+                if (!k.pressed) continue;
+                if (k.mods.shift()) self.kb_shift = true;
+                switch (k.key) {
+                    .tab => self.pending_tab += if (k.mods.shift()) @as(i32, -1) else 1,
+                    .enter, .keypad_enter, .space => self.activate_pressed = true,
+                    .left => self.kb_arrow_left = true,
+                    .right => self.kb_arrow_right = true,
+                    .up => self.kb_arrow_up = true,
+                    .down => self.kb_arrow_down = true,
+                    else => {},
+                }
+            },
+            else => {},
+        };
         self.frame_w = w;
         self.frame_h = h;
         self.mouse_x = mx;
@@ -184,11 +227,38 @@ pub const Ui = struct {
         // Hit test against the rect from the PREVIOUS frame (standard
         // immediate-mode behavior; the arena is reset each frame).
         const prev = self.prev_rects.get(id) orelse layout.Rect{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        const kb = self.beginFocusable(id);
         const clicked = self.mouse_pressed and prev.contains(self.mouse_x, self.mouse_y);
         if (prev.contains(self.mouse_x, self.mouse_y)) self.hot = id;
-        if (clicked) self.active = id;
-        n.color = if (self.active == id) COLOR_BUTTON_ACTIVE else if (self.hot == id) COLOR_BUTTON_HOT else COLOR_BUTTON;
-        return clicked;
+        if (clicked) {
+            self.active = id;
+            self.focus_index = kb.pos;
+        }
+        n.color = if (self.active == id) COLOR_BUTTON_ACTIVE else if (self.hot == id or kb.focused) COLOR_BUTTON_HOT else COLOR_BUTTON;
+        return clicked or (kb.focused and self.activate_pressed);
+    }
+
+    pub const KbFocus = struct { pos: u32, focused: bool };
+
+    /// Claim a declaration-order position for a focusable widget. The widget
+    /// that receives focus gets KbFocus{.focused = true} this frame; the id is
+    /// recorded so end() can draw the ring around its node.
+    pub fn beginFocusable(self: *Ui, id: u32) KbFocus {
+        const pos = self.focus_cursor;
+        self.focus_cursor += 1;
+        const focused = pos == self.focus_index;
+        if (focused) self.kb_focus_id = id;
+        return .{ .pos = pos, .focused = focused };
+    }
+
+    /// Paint a 1px accent ring around a node's rect (drawn above everything).
+    fn paintFocusRing(self: *Ui, rect: layout.Rect) !void {
+        const c = COLOR_FOCUS_RING;
+        const t: f32 = 1;
+        try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = t }, .color = c } });
+        try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = .{ .x = rect.x, .y = rect.y + rect.h - t, .w = rect.w, .h = t }, .color = c } });
+        try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = .{ .x = rect.x, .y = rect.y, .w = t, .h = rect.h }, .color = c } });
+        try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = .{ .x = rect.x + rect.w - t, .y = rect.y, .w = t, .h = rect.h }, .color = c } });
     }
 
     pub fn spacer(self: *Ui, px: f32) !void {
@@ -237,10 +307,19 @@ pub const Ui = struct {
         if (n.id != 0) {
             try self.prev_rects.put(n.id, n.rect);
         }
+        if (self.kb_visible and n.id != 0 and n.id == self.kb_focus_id) try self.paintFocusRing(n.rect);
         for (n.children.items) |c| try self.emitForeground(c);
     }
 
     pub fn end(self: *Ui) !void {
+        if (self.pending_tab != 0) {
+            self.kb_visible = true;
+            if (self.focus_cursor > 0) {
+                const total: i64 = @intCast(self.focus_cursor);
+                const idx = @mod(@as(i64, @intCast(self.focus_index)) + self.pending_tab, total);
+                self.focus_index = @intCast(idx);
+            }
+        }
         _ = self.stack.pop(); // root
         layout.layout(self.root, .{ .x = 0, .y = 0, .w = self.frame_w, .h = self.frame_h });
         // onFrame-time widget draws currently sit in self.cmds; we need

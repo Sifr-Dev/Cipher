@@ -21,6 +21,10 @@ pub const Options = struct {
     title: []const u8 = "cipher",
     app_id: []const u8 = "cipher",
     font_path: []const u8 = DEFAULT_FONT,
+    /// Extra fonts tried (in order) when the primary misses a glyph.
+    /// Their SFNT data must stay alive for the process lifetime; apps
+    /// typically pass paths (the runtime reads them) rather than buffers.
+    fallback_font_paths: []const []const u8 = &.{},
     ui_px: f32 = DEFAULT_UI_PX,
     width: u32 = DEFAULT_W,
     height: u32 = DEFAULT_H,
@@ -388,6 +392,10 @@ pub const Runtime = struct {
             self.font_data = font_data;
             if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, opts.ui_px)) |a| {
                 self.atlas = a;
+                for (opts.fallback_font_paths) |fb_path| {
+                    const fb_data = readFileAlloc(fb_path, std.heap.page_allocator) catch continue;
+                    self.atlas.?.addFallback(fb_data) catch continue;
+                }
                 self.atlas.?.bake(32, 126) catch {};
                 self.atlas.?.bake(160, 255) catch {};
                 // UI state is created now regardless of GPU path so the
@@ -851,6 +859,7 @@ pub const Runtime = struct {
     fn present(self: *Runtime, app: *const App) !void {
         if (self.ui_state != null) {
             var u = &self.ui_state.?;
+            u.events = self.pending_events.items; // before begin(): begin() reads events for focus semantics
             u.begin(@floatFromInt(self.width), @floatFromInt(self.height), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed) catch |e| {
                 if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: ui.begin error: {s}\n", .{@errorName(e)});
                 self.ui_state = null;
@@ -865,7 +874,6 @@ pub const Runtime = struct {
                         a.dirty = false;
                     }
                 }
-                u.events = self.pending_events.items;
                 app.onFrame(app.ptr, self) catch |e| {
                     if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: onFrame error: {s}\n", .{@errorName(e)});
                     self.ui_state = null;
