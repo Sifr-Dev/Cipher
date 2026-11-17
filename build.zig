@@ -33,6 +33,10 @@ pub fn build(b: *std.Build) void {
         .{ "src/gpu/vulkan/device_test.zig", "vulkan_device_test" },
         .{ "src/gpu/vulkan/frame.zig", "vulkan_frame" },
         .{ "src/gpu/vulkan/frame_test.zig", "vulkan_frame_test" },
+        .{ "src/ui/text/font.zig", "text_font" },
+        .{ "src/ui/text/raster.zig", "text_raster" },
+        .{ "src/ui/text/atlas.zig", "text_atlas" },
+        .{ "src/ui/text/text_test.zig", "text_test" },
     };
     inline for (units) |unit| {
         const mod = b.createModule(.{
