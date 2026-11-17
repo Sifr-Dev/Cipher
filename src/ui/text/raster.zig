@@ -115,8 +115,6 @@ pub fn rasterize(segments: []const Segment, width: u32, height: u32, buf: []u8) 
     @memset(cover, 0);
     var xs = std.heap.page_allocator.alloc(f32, segments.len) catch return;
     defer std.heap.page_allocator.free(xs);
-    var ws = std.heap.page_allocator.alloc(i32, segments.len) catch return;
-    defer std.heap.page_allocator.free(ws);
 
     var py: u32 = 0;
     while (py < height) : (py += 1) {
@@ -130,7 +128,6 @@ pub fn rasterize(segments: []const Segment, width: u32, height: u32, buf: []u8) 
                 if (y >= y0 and y < y1) {
                     const t = (y - seg.y0) / (seg.y1 - seg.y0);
                     xs[n] = seg.x0 + t * (seg.x1 - seg.x0);
-                    ws[n] = if (seg.y1 > seg.y0) 1 else -1;
                     n += 1;
                 }
             }
@@ -138,33 +135,25 @@ pub fn rasterize(segments: []const Segment, width: u32, height: u32, buf: []u8) 
             var i: usize = 1;
             while (i < n) : (i += 1) {
                 const xv = xs[i];
-                const wv = ws[i];
                 var j: usize = i;
                 while (j > 0 and xs[j - 1] > xv) : (j -= 1) {
                     xs[j] = xs[j - 1];
-                    ws[j] = ws[j - 1];
                 }
                 xs[j] = xv;
-                ws[j] = wv;
             }
-            var winding: i32 = 0;
+            // Even-odd parity fill: pair up crossings; each pair is an inside span.
             var k: usize = 0;
-            while (k < n) : (k += 1) {
-                const w_before = winding;
-                winding += ws[k];
-                if (w_before != 0) {
-                    const xa = xs[k];
-                    const xb = if (k + 1 < n) xs[k + 1] else xa;
-                    if (xb > xa) {
-                        // add covered width [xa, xb) into row accumulator
-                        const row = cover[@as(usize, py) * width ..];
-                        var px = @as(u32, @intFromFloat(@max(0, @floor(xa))));
-                        const px_end = @as(u32, @intFromFloat(@min(@as(f32, @floatFromInt(width)), @ceil(xb))));
-                        while (px < px_end) : (px += 1) {
-                            const lo = @max(xa, @as(f32, @floatFromInt(px)));
-                            const hi = @min(xb, @as(f32, @floatFromInt(px + 1)));
-                            if (hi > lo) row[px] += hi - lo;
-                        }
+            while (k + 1 < n) : (k += 2) {
+                const xa = xs[k];
+                const xb = xs[k + 1];
+                if (xb > xa) {
+                    const row = cover[@as(usize, py) * width ..];
+                    var px = @as(u32, @intFromFloat(@max(0, @floor(xa))));
+                    const px_end = @as(u32, @intFromFloat(@min(@as(f32, @floatFromInt(width)), @ceil(xb))));
+                    while (px < px_end) : (px += 1) {
+                        const lo = @max(xa, @as(f32, @floatFromInt(px)));
+                        const hi = @min(xb, @as(f32, @floatFromInt(px + 1)));
+                        if (hi > lo) row[px] += hi - lo;
                     }
                 }
             }

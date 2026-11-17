@@ -1,5 +1,5 @@
 //! End-to-end GPU text test: build the CPU glyph atlas from a real TTF,
-//! upload it to a device-local R8 texture, render a glyph quad through the
+//! upload it to a device-local R8 texture, render a glyph quad at 20px through the
 //! text graphics pipeline, copy to host, and assert EXACT pixels.
 const std = @import("std");
 const device = @import("gpu/vulkan/device.zig");

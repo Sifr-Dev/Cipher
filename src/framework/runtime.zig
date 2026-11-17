@@ -51,7 +51,8 @@ pub fn rgba01(c: u32) [4]f32 {
 
 /// Convert UI draw commands into GPU quads (rects sample the reserved white
 /// texel (0,0); text expands to per-glyph quads from the atlas).
-pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out: []text_gpu.Quad) !usize {
+pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out_in: []text_gpu.Quad, offset: usize) !usize {
+    const out = out_in[offset..];
     var n: usize = 0;
     for (cmds) |c| {
         switch (c) {
@@ -103,7 +104,7 @@ pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out
             },
         }
     }
-    return n;
+    return offset + n;
 }
 
 /// Decode a text/uri-list payload into newline-separated local paths
@@ -331,6 +332,27 @@ pub const Runtime = struct {
                     self.font_data = font_data;
                     if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, opts.ui_px)) |a| {
                         self.atlas = a;
+                        // Bake printable ASCII + Latin-1 before uploading:
+                        // uploadAtlas happens once, glyph rasterization is lazy.
+                        self.atlas.?.bake(32, 126) catch {};
+                        self.atlas.?.bake(160, 255) catch {};
+                        if (std.c.getenv("CIPHER_DUMP_ATLAS")) |p| {
+                            const fd = std.posix.openat(std.posix.AT.FDCWD, std.mem.span(p), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch null;
+                            if (fd) |f| {
+                                defer _ = std.c.close(f);
+                                var hdr_buf: [64]u8 = undefined;
+                                const hdr = std.fmt.bufPrint(&hdr_buf, "P6\n{d} {d}\n255\n", .{ self.atlas.?.atlas_w, self.atlas.?.atlas_h }) catch unreachable;
+                                _ = std.os.linux.write(f, hdr.ptr, hdr.len);
+                                var buf3 = try std.heap.page_allocator.alloc(u8, self.atlas.?.atlas.len * 3);
+                                defer std.heap.page_allocator.free(buf3);
+                                for (self.atlas.?.atlas, 0..) |px, i| {
+                                    buf3[i * 3] = px;
+                                    buf3[i * 3 + 1] = px;
+                                    buf3[i * 3 + 2] = px;
+                                }
+                                _ = std.os.linux.write(f, buf3.ptr, buf3.len);
+                            }
+                        }
                         if (text_gpu.GpuText.init(&self.vk, &self.dev, self.width, self.height, a.atlas_w, a.atlas_h)) |g| {
                             self.gt = g;
                             self.gt.?.uploadAtlas(&self.vk, &self.dev, a.atlas) catch {
@@ -768,6 +790,15 @@ pub const Runtime = struct {
                 self.ui_state = null;
             };
             if (self.ui_state != null) {
+                // Re-upload the atlas if a glyph was rasterized since the last upload
+                if (self.atlas) |*a| {
+                    if (a.dirty) {
+                        if (self.gt) |*g| {
+                            g.uploadAtlas(&self.vk, &self.dev, a.atlas) catch {};
+                            a.dirty = false;
+                        }
+                    }
+                }
                 u.events = self.pending_events.items;
                 app.onFrame(app.ptr, self) catch {
                     self.ui_state = null;
@@ -778,14 +809,18 @@ pub const Runtime = struct {
                     };
                 }
                 if (self.ui_state != null) {
-                    var n = try buildQuads(&self.atlas.?, u.drawCmds(), self.quads_buf);
+                    // background content first (terminal grid, app-drawn bg),
+                    // UI widgets on top of it.
+                    var n: usize = 0;
+                    var eq_len: usize = 0;
                     if (self.extra_quads) |eq| {
-                        const room = self.quads_buf.len - n;
-                        const take = @min(eq.len, room);
-                        if (take > 0) @memcpy(self.quads_buf[n..][0..take], eq[0..take]);
-                        n += take;
+                        const take = @min(eq.len, self.quads_buf.len);
+                        if (take > 0) @memcpy(self.quads_buf[0..take], eq[0..take]);
+                        eq_len = take;
+                        n = eq_len;
                     }
                     self.extra_quads = null; // one frame only
+                    n = try buildQuads(&self.atlas.?, u.drawCmds(), self.quads_buf, eq_len);
                     try self.gt.?.render(&self.vk, &self.dev, self.quads_buf[0..n]);
                     const src = self.gt.?.pixels();
                     @memcpy(self.shm_buf.pixels[0..src.len], src);
@@ -826,6 +861,32 @@ pub const Runtime = struct {
         try self.conn.send(self.surface, 6, &.{});
     }
 
+    fn dumpFrame(self: *Runtime, n: u32) void {
+        const path = std.c.getenv("CIPHER_DUMP_FRAME") orelse return;
+        const p = std.mem.span(path);
+        const fd = std.posix.openat(std.posix.AT.FDCWD, p, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch return;
+        defer _ = std.c.close(fd);
+        var hdr: [128]u8 = undefined;
+        const h = std.fmt.bufPrint(&hdr, "P6\n{d} {d}\n255\n", .{ self.width, self.height }) catch return;
+        _ = std.os.linux.write(fd, h.ptr, h.len);
+        // shm pixels are BGRA (ARGB8888 little-endian); emit RGB
+        const stride = self.shm_buf.stride;
+        var row_buf = std.heap.page_allocator.alloc(u8, self.width * 3) catch return;
+        defer std.heap.page_allocator.free(row_buf);
+        var y: u32 = 0;
+        while (y < self.height) : (y += 1) {
+            const src = self.shm_buf.pixels[y * stride ..][0 .. self.width * 4];
+            var x: u32 = 0;
+            while (x < self.width) : (x += 1) {
+                row_buf[x * 3 + 0] = src[x * 4 + 2]; // R
+                row_buf[x * 3 + 1] = src[x * 4 + 1]; // G
+                row_buf[x * 3 + 2] = src[x * 4 + 0]; // B
+            }
+            _ = std.os.linux.write(fd, row_buf.ptr, row_buf.len);
+        }
+        std.debug.print("CIPHER_FRAME_DUMP frame={d} path={s} size={d}x{d}\n", .{ n, p, self.width, self.height });
+    }
+
     fn runLoop(self: *Runtime, app: *const App) !void {
         var frames: u32 = 0;
         // Optional test cap: CIPHER_MAX_FRAMES=N quits cleanly after N frames.
@@ -834,11 +895,13 @@ pub const Runtime = struct {
             if (std.fmt.parseInt(u32, std.mem.span(p), 10)) |n| max_frames = n else |_| {}
         }
         try self.present(app); // first frame immediately
+        self.dumpFrame(0);
         while (!self.quit) {
             try self.pump(app, -1); // block until input or vsync callback
             if (self.frame_due) {
                 self.frame_due = false;
                 try self.present(app);
+                self.dumpFrame(frames + 1);
                 frames += 1;
                 if (max_frames) |m| {
                     if (frames >= m) self.quit = true;

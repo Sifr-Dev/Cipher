@@ -30,6 +30,9 @@ pub const TextAtlas = struct {
     shelf_h: u32 = 0,
 
     cache: std.AutoHashMap(u32, GlyphInfo),
+    /// Set when a glyph is rasterized after the atlas texture was uploaded;
+    /// the runtime re-uploads when set.
+    dirty: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, font_data: []const u8, px_size: f32) !TextAtlas {
         const f = try font.Font.load(font_data);
@@ -135,7 +138,18 @@ pub const TextAtlas = struct {
             info.top = 0;
         }
         try self.cache.put(cp, info);
+        self.dirty = true;
         return info;
+    }
+
+    /// Eagerly rasterize a codepoint range so the atlas texture can be
+    /// uploaded once at startup (glyph rasterization is lazy otherwise).
+    pub fn bake(self: *TextAtlas, first: u32, last: u32) !void {
+        var cp = first;
+        while (cp <= last) : (cp += 1) {
+            _ = self.glyph(cp) catch {}; // skip unmappable codepoints
+        }
+        self.dirty = false; // everything baked is in the CPU atlas already
     }
 
     /// Width of a string in px at this atlas size (sum of advances).

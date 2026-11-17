@@ -154,11 +154,14 @@ pub const Ui = struct {
     }
 
     pub fn label(self: *Ui, str: []const u8, color: u32) !void {
+        // own the string for this frame: callers often pass stack-backed
+        // buffers that die before buildQuads consumes drawCmds
+        const owned = try self.allocator().dupe(u8, str);
         const n = try self.newNode();
         n.kind = .label;
-        n.text = str;
+        n.text = owned;
         n.color = color;
-        n.content_w = try self.atlas.measure(str);
+        n.content_w = try self.atlas.measure(owned);
         n.content_h = self.lineHeight();
         try self.current().addChild(self.allocator(), n);
     }
@@ -171,7 +174,7 @@ pub const Ui = struct {
         const pad_y: f32 = 8;
         const n = try self.newNode();
         n.kind = .button;
-        n.text = str;
+        n.text = try self.allocator().dupe(u8, str);
         n.id = id;
         n.content_w = try self.atlas.measure(str) + 2 * pad_x;
         n.content_h = self.lineHeight() + 2 * pad_y;
@@ -197,11 +200,21 @@ pub const Ui = struct {
         try self.current().addChild(self.allocator(), n);
     }
 
-    fn emitWalk(self: *Ui, n: *layout.Node) !void {
+    /// Pass A: emit only backgrounds (panel + button rects). Widgets drawn
+    /// during onFrame paint on top of these; labels/texts come in pass B.
+    fn emitBackgrounds(self: *Ui, n: *layout.Node) !void {
         switch (n.kind) {
             .panel, .button => {
                 try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = n.rect, .color = n.color } });
             },
+            else => {},
+        }
+        for (n.children.items) |c| try self.emitBackgrounds(c);
+    }
+
+    /// Pass B: emit foreground (labels + button-centered text) and persist rects.
+    fn emitForeground(self: *Ui, n: *layout.Node) !void {
+        switch (n.kind) {
             .label => {
                 try self.cmds.append(self.allocator(), .{ .text = .{
                     .x = n.rect.x + n.pad,
@@ -210,29 +223,35 @@ pub const Ui = struct {
                     .color = n.color,
                 } });
             },
-            .none => {},
-        }
-        if (n.kind == .button) {
-            // Button label centered in the button rect.
-            const tw = try self.atlas.measure(n.text);
-            try self.cmds.append(self.allocator(), .{ .text = .{
-                .x = n.rect.x + (n.rect.w - tw) / 2,
-                .baseline = n.rect.y + (n.rect.h - self.lineHeight()) / 2 + self.ascentPx(),
-                .str = n.text,
-                .color = if (n.color == COLOR_BUTTON_ACTIVE) COLOR_VOID else COLOR_TEXT,
-            } });
+            .button => {
+                const tw = try self.atlas.measure(n.text);
+                try self.cmds.append(self.allocator(), .{ .text = .{
+                    .x = n.rect.x + (n.rect.w - tw) / 2,
+                    .baseline = n.rect.y + (n.rect.h - self.lineHeight()) / 2 + self.ascentPx(),
+                    .str = n.text,
+                    .color = if (n.color == COLOR_BUTTON_ACTIVE) COLOR_VOID else COLOR_TEXT,
+                } });
+            },
+            else => {},
         }
         if (n.id != 0) {
-            // Persist the rect for next frame's hit test / drawing.
             try self.prev_rects.put(n.id, n.rect);
         }
-        for (n.children.items) |c| try self.emitWalk(c);
+        for (n.children.items) |c| try self.emitForeground(c);
     }
 
     pub fn end(self: *Ui) !void {
         _ = self.stack.pop(); // root
         layout.layout(self.root, .{ .x = 0, .y = 0, .w = self.frame_w, .h = self.frame_h });
-        try self.emitWalk(self.root);
+        // onFrame-time widget draws currently sit in self.cmds; we need
+        // panel/button backgrounds BELOW them. Stash, emit backgrounds,
+        // then the widget cmds, then the foreground.
+        const alloc = self.allocator();
+        const saved = try alloc.dupe(DrawCmd, self.cmds.items);
+        self.cmds.clearRetainingCapacity();
+        try self.emitBackgrounds(self.root);
+        try self.cmds.appendSlice(alloc, saved);
+        try self.emitForeground(self.root);
     }
 
     /// Find the rect of the widget with the given id from the last end() pass.
