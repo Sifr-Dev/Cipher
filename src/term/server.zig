@@ -228,7 +228,11 @@ pub const Server = struct {
     }
 
     fn makeObj(self: *Server, entries: []const json.Value.Entry) ![]json.Value.Entry {
-        return self.allocator.dupe(json.Value.Entry, entries);
+        const slice = try self.allocator.alloc(json.Value.Entry, entries.len);
+        for (entries, 0..) |e, i| {
+            slice[i] = .{ .key = try self.allocator.dupe(u8, e.key), .value = e.value };
+        }
+        return slice;
     }
 
     fn reply(self: *Server, c: *Client, v: json.Value) !void {
@@ -236,6 +240,7 @@ pub const Server = struct {
         defer self.allocator.free(s);
         try c.out_buf.appendSlice(self.allocator, s);
         try c.out_buf.append(self.allocator, '\n');
+        json.freeValue(self.allocator, v); // reply owns the value tree
     }
 
     fn replyErr(self: *Server, c: *Client, msg: []const u8) !void {
@@ -336,7 +341,7 @@ pub const Server = struct {
                 text2 = text[start..];
             }
         }
-        const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } }, .{ .key = "pane", .value = .{ .num = @floatFromInt(id) } }, .{ .key = "text", .value = .{ .str = text2 } } });
+        const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } }, .{ .key = "pane", .value = .{ .num = @floatFromInt(id) } }, .{ .key = "text", .value = .{ .str = try self.allocator.dupe(u8, text2) } } });
         try self.reply(c, .{ .obj = e });
     }
 
