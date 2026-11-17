@@ -31,6 +31,8 @@ pub fn build(b: *std.Build) void {
         .{ "src/gpu/vulkan/loader_test.zig", "vulkan_loader_test" },
         .{ "src/gpu/vulkan/device.zig", "vulkan_device" },
         .{ "src/gpu/vulkan/device_test.zig", "vulkan_device_test" },
+        .{ "src/gpu/vulkan/frame.zig", "vulkan_frame" },
+        .{ "src/gpu/vulkan/frame_test.zig", "vulkan_frame_test" },
     };
     inline for (units) |unit| {
         const mod = b.createModule(.{
