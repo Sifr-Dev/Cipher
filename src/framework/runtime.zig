@@ -80,7 +80,7 @@ pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out
                         i += 1;
                         continue;
                     };
-                    const g = try atlas.glyph(d.cp);
+                    const g = atlas.glyphSafe(d.cp);
                     if (g.w > 0 and g.h > 0) {
                         if (n >= out.len) return error.TooManyQuads;
                         const aw = @as(f32, @floatFromInt(atlas.atlas_w));

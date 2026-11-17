@@ -200,3 +200,19 @@ test "atlas: measure + drawText produce expected ink; PPM evidence" {
     }
     std.debug.print("TEXT_ATLAS_OK measure_H={d:.2} ink={d} brassish={d} ppm=/tmp/sifr_text.ppm\n", .{ m_h, ink, brassish });
 }
+
+test "glyphSafe: unmapped/astral codepoints never error, layout survives" {
+    const font_data = try readFile(FONT_PATH, std.testing.allocator);
+    defer std.testing.allocator.free(font_data);
+    var a = try atlas_mod.TextAtlas.init(std.testing.allocator, font_data, 24);
+    defer a.deinit();
+    // 0x0F0000 is unmapped in LiberationSans (cmap format 4 returns
+    // .notdef=0 for cp > 0xFFFF); neither may error the string.
+    const w = try a.measure("A\u{F0000}B");
+    try std.testing.expect(w > 20); // ~3 advances at px=24 (~16px each)
+    try std.testing.expect(w < 200);
+    var fb: [256 * 64]u32 = undefined;
+    @memset(&fb, 0xFF04060B);
+    try a.drawText(&fb, 256, 64, 4, 40, "A\u{0F0000}B", 0xFFE8ECF4);
+    std.debug.print("TEXT_GLYPHSAFE_OK measure={d:.1}\n", .{w});
+}

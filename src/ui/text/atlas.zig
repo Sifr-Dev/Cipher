@@ -142,6 +142,22 @@ pub const TextAtlas = struct {
         return info;
     }
 
+    /// Like glyph(), but never fails: on cmap/outline/atlas failure the
+    /// .notdef glyph is used (usually an advance-only zero-coverage entry);
+    /// if even that is unavailable, a blank advance-only glyph is returned
+    /// so text layout never breaks when a single glyph is bad.
+    pub fn glyphSafe(self: *TextAtlas, cp: u32) GlyphInfo {
+        return self.glyph(cp) catch self.glyph(0) catch .{
+            .atlas_x = 0,
+            .atlas_y = 0,
+            .w = 0,
+            .h = 0,
+            .bearing_x = 0,
+            .top = 0,
+            .advance = self.px_size * 0.5,
+        };
+    }
+
     /// Eagerly rasterize a codepoint range so the atlas texture can be
     /// uploaded once at startup (glyph rasterization is lazy otherwise).
     pub fn bake(self: *TextAtlas, first: u32, last: u32) !void {
@@ -161,7 +177,7 @@ pub const TextAtlas = struct {
                 i += 1;
                 continue;
             };
-            const g = try self.glyph(d.cp);
+            const g = self.glyphSafe(d.cp);
             w += g.advance;
             i += d.len;
         }
@@ -178,7 +194,7 @@ pub const TextAtlas = struct {
                 i += 1;
                 continue;
             };
-            const g = try self.glyph(d.cp);
+            const g = self.glyphSafe(d.cp);
             if (g.w > 0 and g.h > 0) {
                 const gx = @as(i32, @intFromFloat(@round(pen + g.bearing_x)));
                 const gy = @as(i32, @intFromFloat(@round(baseline - g.top)));
