@@ -16,6 +16,7 @@ pub const Error = error{
     OutOfMemory,
     MapFailed,
     FdError,
+    WouldBlock, // nonblocking socket drained; not a real failure
 };
 
 pub const WL_DISPLAY: u32 = 1;
@@ -184,6 +185,13 @@ pub const Connection = struct {
         _ = std.os.linux.close(self.fd);
     }
 
+    /// Put the socket into nonblocking mode (runtime drains with poll + WouldBlock).
+    pub fn setNonBlocking(self: *Connection) void {
+        const flags = std.os.linux.fcntl(self.fd, std.os.linux.F.GETFL, 0);
+        if (@as(i64, @bitCast(flags)) >= 0)
+            _ = std.os.linux.fcntl(self.fd, std.os.linux.F.SETFL, flags | 0x800); // O_NONBLOCK
+    }
+
     pub fn send(self: *Connection, sender: u32, opcode: u16, payload: []const u8) !void {
         var message: [MAX_MESSAGE]u8 = undefined;
         std.mem.writeInt(u32, message[0..4], sender, .little);
@@ -252,7 +260,12 @@ pub const Connection = struct {
             .flags = 0,
         };
         const rc = std.os.linux.recvmsg(self.fd, @ptrCast(&msg), 0);
-        if (@as(i64, @bitCast(rc)) < 0) return Error.ReadFailed;
+        if (@as(i64, @bitCast(rc)) < 0) {
+            const err = std.os.linux.errno(rc);
+            if (err == .AGAIN) return Error.WouldBlock;
+            return Error.ReadFailed;
+        }
+        if (rc == 0) return Error.ReadFailed; // compositor hung up
         self.recv_len += @intCast(rc);
 
         if (msg.controllen >= @sizeOf(std.os.linux.cmsghdr)) {
@@ -297,10 +310,19 @@ fn writeAll(fd: i32, buffer: []const u8) !void {
     var written: usize = 0;
     while (written < buffer.len) {
         const rc = std.os.linux.write(fd, buffer[written..].ptr, buffer[written..].len);
-        if (@as(i64, @bitCast(rc)) < 0) return Error.WriteFailed;
+        if (@as(i64, @bitCast(rc)) < 0) {
+            if (std.os.linux.errno(rc) == .AGAIN) {
+                // Socket buffer full on a nonblocking fd: wait for POLLOUT.
+                var fds = [_]std.os.linux.pollfd{.{ .fd = fd, .events = std.os.linux.POLL.OUT, .revents = 0 }};
+                _ = std.os.linux.poll(&fds, 1, -1);
+                continue;
+            }
+            return Error.WriteFailed;
+        }
         written += @intCast(rc);
     }
 }
+
 
 test "cursor round-trips u32 and strings" {
     var cursor = Cursor{};

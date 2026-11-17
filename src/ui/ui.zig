@@ -5,6 +5,7 @@
 const std = @import("std");
 const layout = @import("layout.zig");
 const atlas_mod = @import("text/atlas.zig");
+const input = @import("../framework/input.zig");
 
 pub const DrawCmd = union(enum) {
     rect: struct { rect: layout.Rect, color: u32 },
@@ -38,6 +39,19 @@ pub const Ui = struct {
     frame_h: f32 = 0,
     base_allocator: std.mem.Allocator,
     prev_rects: std.AutoHashMap(u32, layout.Rect), // survives frame arena resets
+    events: []const input.Event = &.{}, // input events from the last event drain
+    states: std.ArrayList(StateEntry), // persistent per-widget state (small N, linear scan)
+
+    pub const WidgetState = union(enum) {
+        slider: f32,
+        checkbox: bool,
+        list: struct { scroll: f32 = 0, sel: i32 = -1 },
+        text: struct { buf: [4096]u8 = undefined, len: usize = 0, cursor: usize = 0 },
+        tabs: i32,
+        none: void,
+    };
+
+    pub const StateEntry = struct { id: u32, state: WidgetState };
 
     pub fn init(base: std.mem.Allocator, atlas: *atlas_mod.TextAtlas) Ui {
         return .{
@@ -47,19 +61,41 @@ pub const Ui = struct {
             .cmds = .empty,
             .base_allocator = base,
             .prev_rects = std.AutoHashMap(u32, layout.Rect).init(base),
+            .states = .empty,
         };
     }
 
     pub fn deinit(self: *Ui) void {
+        self.states.deinit(self.base_allocator);
         self.arena.deinit();
         self.prev_rects.deinit();
     }
 
-    fn allocator(self: *Ui) std.mem.Allocator {
+    /// Persistent per-widget state slot (survives the per-frame arena reset).
+    /// Returned pointer is valid until the next wstate call.
+    pub fn wstate(self: *Ui, id: u32, default: WidgetState) !*WidgetState {
+        for (self.states.items) |*e| {
+            if (e.id == id) return &e.state;
+        }
+        try self.states.append(self.base_allocator, .{ .id = id, .state = default });
+        return &self.states.items[self.states.items.len - 1].state;
+    }
+
+    /// Append a raw rect draw command (for custom widgets).
+    pub fn addRect(self: *Ui, r: layout.Rect, color: u32) !void {
+        try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = r, .color = color } });
+    }
+
+    /// Append a raw text draw command (for custom widgets).
+    pub fn addText(self: *Ui, x: f32, baseline: f32, str: []const u8, color: u32) !void {
+        try self.cmds.append(self.allocator(), .{ .text = .{ .x = x, .baseline = baseline, .str = str, .color = color } });
+    }
+
+    pub fn allocator(self: *Ui) std.mem.Allocator {
         return self.arena.allocator();
     }
 
-    fn newNode(self: *Ui) !*layout.Node {
+    pub fn newNode(self: *Ui) !*layout.Node {
         const n = try self.allocator().create(layout.Node);
         n.* = .{};
         n.children = .empty;
@@ -94,7 +130,7 @@ pub const Ui = struct {
         try self.stack.append(self.allocator(), self.root);
     }
 
-    fn current(self: *Ui) *layout.Node {
+    pub fn current(self: *Ui) *layout.Node {
         return self.stack.items[self.stack.items.len - 1];
     }
 
@@ -185,7 +221,9 @@ pub const Ui = struct {
                 .str = n.text,
                 .color = if (n.color == COLOR_BUTTON_ACTIVE) COLOR_VOID else COLOR_TEXT,
             } });
-            // Persist the rect for next frame's hit test.
+        }
+        if (n.id != 0) {
+            // Persist the rect for next frame's hit test / drawing.
             try self.prev_rects.put(n.id, n.rect);
         }
         for (n.children.items) |c| try self.emitWalk(c);

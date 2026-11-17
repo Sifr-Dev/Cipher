@@ -34,7 +34,7 @@ pub const PushConstants = extern struct {
     extent: [4]f32, // xy = width/height in pixels
 };
 
-const MAX_QUADS: usize = 4096;
+const MAX_QUADS: usize = 65536; // a 200x60 terminal = 12k cells -> rects + glyph quads
 
 pub const GpuText = struct {
     width: u32,
@@ -606,6 +606,34 @@ pub const GpuText = struct {
             return error.CreateFenceFailed;
 
         return self;
+    }
+
+
+    /// Destroy all device-child objects (safe on NVIDIA; only
+    /// vkDestroyDevice/vkDestroyInstance crash there). Used on resize.
+    pub fn deinitSoft(self: *GpuText, vk: *Vulkan, dev: *const Device) void {
+        const h = dev.device;
+        vk.vkDestroyFence(h, self.fence, null);
+        vk.vkDestroyCommandPool(h, self.pool, null);
+        vk.vkDestroyPipeline(h, self.pipeline, null);
+        vk.vkDestroyPipelineLayout(h, self.pipeline_layout, null);
+        vk.vkDestroyFramebuffer(h, self.framebuffer, null);
+        vk.vkDestroyRenderPass(h, self.render_pass, null);
+        vk.vkDestroyShaderModule(h, self.vert_module, null);
+        vk.vkDestroyShaderModule(h, self.frag_module, null);
+        vk.vkDestroyDescriptorPool(h, self.desc_pool, null);
+        vk.vkDestroyDescriptorSetLayout(h, self.desc_layout, null);
+        vk.vkDestroySampler(h, self.sampler, null);
+        vk.vkDestroyImageView(h, self.atlas_view, null);
+        vk.vkDestroyImage(h, self.atlas_image, null);
+        vk.vkFreeMemory(h, self.atlas_mem, null);
+        vk.vkDestroyBuffer(h, self.vb, null);
+        vk.vkFreeMemory(h, self.vb_mem, null);
+        vk.vkDestroyImageView(h, self.image_view, null);
+        vk.vkDestroyImage(h, self.image, null);
+        vk.vkFreeMemory(h, self.image_mem, null);
+        vk.vkDestroyBuffer(h, self.buffer, null);
+        vk.vkFreeMemory(h, self.buffer_mem, null);
     }
 
     /// Host-visible frame bytes, BGRA order == wl_shm ARGB8888 on little-endian.

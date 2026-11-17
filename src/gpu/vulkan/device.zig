@@ -836,6 +836,9 @@ pub const Vulkan = struct {
     vkCmdBindVertexBuffers: *const fn (VkCommandBuffer, u32, u32, ?[*]const VkBuffer, ?[*]const u64) callconv(.c) void,
     vkCmdCopyBufferToImage: *const fn (VkCommandBuffer, VkBuffer, VkImage, u32, u32, ?[*]const VkBufferImageCopy) callconv(.c) void,
     vkCreateSampler: *const fn (VkDevice, *const VkSamplerCreateInfo, ?*const anyopaque, *VkSampler) callconv(.c) VkResult,
+    vkDestroyRenderPass: *const fn (VkDevice, VkRenderPass, ?*const anyopaque) callconv(.c) void,
+    vkDestroyFramebuffer: *const fn (VkDevice, VkFramebuffer, ?*const anyopaque) callconv(.c) void,
+    vkDestroySampler: *const fn (VkDevice, VkSampler, ?*const anyopaque) callconv(.c) void,
 };
 
 pub fn load() !Vulkan {
@@ -916,6 +919,9 @@ pub fn load() !Vulkan {
     const cmd_bind_vertex_buffers = std.c.dlsym(handle, "vkCmdBindVertexBuffers") orelse return error.DlsymFailed;
     const cmd_copy_buffer_to_image = std.c.dlsym(handle, "vkCmdCopyBufferToImage") orelse return error.DlsymFailed;
     const create_sampler = std.c.dlsym(handle, "vkCreateSampler") orelse return error.DlsymFailed;
+    const destroy_render_pass = std.c.dlsym(handle, "vkDestroyRenderPass") orelse return error.DlsymFailed;
+    const destroy_framebuffer = std.c.dlsym(handle, "vkDestroyFramebuffer") orelse return error.DlsymFailed;
+    const destroy_sampler = std.c.dlsym(handle, "vkDestroySampler") orelse return error.DlsymFailed;
 
     return .{
         .handle = handle,
@@ -994,6 +1000,9 @@ pub fn load() !Vulkan {
         .vkCmdBindVertexBuffers = @ptrCast(cmd_bind_vertex_buffers),
         .vkCmdCopyBufferToImage = @ptrCast(cmd_copy_buffer_to_image),
         .vkCreateSampler = @ptrCast(create_sampler),
+        .vkDestroyRenderPass = @ptrCast(destroy_render_pass),
+        .vkDestroyFramebuffer = @ptrCast(destroy_framebuffer),
+        .vkDestroySampler = @ptrCast(destroy_sampler),
     };
 }
 
