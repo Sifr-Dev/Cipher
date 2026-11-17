@@ -86,8 +86,9 @@ test "GPU text: atlas upload + glyph quad renders exact pixels" {
         .v0 = @as(f32, @floatFromInt(g.atlas_y)) / @as(f32, @floatFromInt(at.atlas_h)),
         .u1 = @as(f32, @floatFromInt(g.atlas_x + g.w)) / @as(f32, @floatFromInt(at.atlas_w)),
         .v1 = @as(f32, @floatFromInt(g.atlas_y + g.h)) / @as(f32, @floatFromInt(at.atlas_h)),
+        .color = brass,
     };
-    try gt.render(&vk, &dev, &.{quad}, brass);
+    try gt.render(&vk, &dev, &.{quad});
 
     const px = gt.pixels();
     try std.testing.expectEqual(@as(usize, W * H * 4), px.len);
@@ -119,8 +120,9 @@ test "GPU text: atlas upload + glyph quad renders exact pixels" {
         .v0 = quad.v0,
         .u1 = quad.u1,
         .v1 = quad.v1,
+        .color = brass,
     };
-    try gt.render(&vk, &dev, &.{quad2}, brass);
+    try gt.render(&vk, &dev, &.{quad2});
     const px2 = gt.pixels();
     try std.testing.expectEqualSlices(u8, &.{ 0x45, 0xB5, 0xEB, 0xFF }, atPx(px2, W, @as(u32, @intFromFloat(qx2)) + sp[0], @as(u32, @intFromFloat(qy)) + sp[1]));
     try std.testing.expectEqualSlices(u8, &.{ 0x0B, 0x06, 0x04, 0xFF }, atPx(px2, W, @as(u32, @intFromFloat(qx)) + sp[0], @as(u32, @intFromFloat(qy)) + sp[1]));

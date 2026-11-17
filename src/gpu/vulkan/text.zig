@@ -10,7 +10,7 @@ const shader = @import("shader.zig");
 pub const Vulkan = d.Vulkan;
 pub const Device = d.Device;
 
-/// One glyph quad in pixel coordinates (y-down) + atlas UVs.
+/// One quad in pixel coordinates (y-down) + atlas UVs + color.
 pub const Quad = struct {
     x: f32,
     y: f32,
@@ -20,17 +20,18 @@ pub const Quad = struct {
     v0: f32,
     u1: f32,
     v1: f32,
+    color: [4]f32,
 };
 
 const Vertex = extern struct {
     pos: [2]f32,
     uv: [2]f32,
+    color: [4]f32,
 };
 
 /// Must match layout(push_constant) in text.vert / text.frag.
 pub const PushConstants = extern struct {
-    extent: [4]f32, // xy = width/height in pixels; vec4 to match std430 layout
-    color: [4]f32,
+    extent: [4]f32, // xy = width/height in pixels
 };
 
 const MAX_QUADS: usize = 4096;
@@ -479,6 +480,7 @@ pub const GpuText = struct {
         const vb_attrs = [_]d.VkPipelineVertexInputAttributeDescription{
             .{ .location = 0, .binding = 0, .format = d.VK_FORMAT_R32G32_SFLOAT, .offset = 0 },
             .{ .location = 1, .binding = 0, .format = d.VK_FORMAT_R32G32_SFLOAT, .offset = 8 },
+            .{ .location = 2, .binding = 0, .format = d.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 16 },
         };
         const vi = d.VkPipelineVertexInputStateCreateInfo{
             .sType = d.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -486,7 +488,7 @@ pub const GpuText = struct {
             .flags = 0,
             .vertexBindingDescriptionCount = 1,
             .pVertexBindingDescriptions = @ptrCast(&vb_binding),
-            .vertexAttributeDescriptionCount = 2,
+            .vertexAttributeDescriptionCount = 3,
             .pVertexAttributeDescriptions = @ptrCast(&vb_attrs),
         };
         const ia = d.VkPipelineInputAssemblyStateCreateInfo{
@@ -708,7 +710,7 @@ pub const GpuText = struct {
     }
 
     /// Render glyph quads and copy the frame to the host buffer.
-    pub fn render(self: *GpuText, vk: *Vulkan, dev: *const Device, quads: []const Quad, color: [4]f32) !void {
+    pub fn render(self: *GpuText, vk: *Vulkan, dev: *const Device, quads: []const Quad) !void {
         const dev_handle = dev.device;
         if (quads.len > MAX_QUADS) return error.TooManyQuads;
 
@@ -718,12 +720,12 @@ pub const GpuText = struct {
             const x1 = q.x + q.w;
             const y1 = q.y + q.h;
             const quad_verts = [6]Vertex{
-                .{ .pos = .{ q.x, q.y }, .uv = .{ q.u0, q.v0 } },
-                .{ .pos = .{ x1, q.y }, .uv = .{ q.u1, q.v0 } },
-                .{ .pos = .{ x1, y1 }, .uv = .{ q.u1, q.v1 } },
-                .{ .pos = .{ q.x, q.y }, .uv = .{ q.u0, q.v0 } },
-                .{ .pos = .{ x1, y1 }, .uv = .{ q.u1, q.v1 } },
-                .{ .pos = .{ q.x, y1 }, .uv = .{ q.u0, q.v1 } },
+                .{ .pos = .{ q.x, q.y }, .uv = .{ q.u0, q.v0 }, .color = q.color },
+                .{ .pos = .{ x1, q.y }, .uv = .{ q.u1, q.v0 }, .color = q.color },
+                .{ .pos = .{ x1, y1 }, .uv = .{ q.u1, q.v1 }, .color = q.color },
+                .{ .pos = .{ q.x, q.y }, .uv = .{ q.u0, q.v0 }, .color = q.color },
+                .{ .pos = .{ x1, y1 }, .uv = .{ q.u1, q.v1 }, .color = q.color },
+                .{ .pos = .{ q.x, y1 }, .uv = .{ q.u0, q.v1 }, .color = q.color },
             };
             @memcpy(verts[i * 6 ..][0..6], &quad_verts);
         }
@@ -779,7 +781,6 @@ pub const GpuText = struct {
         vk.vkCmdBindDescriptorSets(self.cmd, d.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout, 0, 1, @ptrCast(&self.desc_set), 0, null);
         const pc = PushConstants{
             .extent = .{ @floatFromInt(self.width), @floatFromInt(self.height), 0, 0 },
-            .color = color,
         };
         vk.vkCmdPushConstants(self.cmd, self.pipeline_layout, d.VK_SHADER_STAGE_VERTEX_BIT | d.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), @ptrCast(&pc));
         const vb_off: u64 = 0;

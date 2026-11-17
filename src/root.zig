@@ -6,6 +6,92 @@ const types = @import("core/types.zig");
 const wayland = @import("os/linux/wayland/client.zig");
 const device = @import("gpu/vulkan/device.zig");
 const frame = @import("gpu/vulkan/frame.zig");
+const text_gpu = @import("gpu/vulkan/text.zig");
+const ui_mod = @import("ui/ui.zig");
+const atlas_mod = @import("ui/text/atlas.zig");
+
+const FONT_PATH = "/usr/share/fonts/liberation/LiberationSans-Regular.ttf";
+const UI_PX: f32 = 20;
+
+fn readFileAlloc(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0);
+    defer _ = std.c.close(fd);
+    const buf = try allocator.alloc(u8, 8 * 1024 * 1024);
+    var off: usize = 0;
+    while (off < buf.len) {
+        const n = try std.posix.read(fd, buf[off..]);
+        if (n == 0) break;
+        off += n;
+    }
+    return try allocator.realloc(buf, off);
+}
+
+/// 0xAARRGGBB -> linear-ish [4]f32 rgba for the GPU vertex color.
+fn rgba01(c: u32) [4]f32 {
+    return .{
+        @as(f32, @floatFromInt((c >> 16) & 0xFF)) / 255.0,
+        @as(f32, @floatFromInt((c >> 8) & 0xFF)) / 255.0,
+        @as(f32, @floatFromInt(c & 0xFF)) / 255.0,
+        @as(f32, @floatFromInt((c >> 24) & 0xFF)) / 255.0,
+    };
+}
+
+/// Convert UI draw commands into GPU quads (rects sample the reserved white
+/// texel (0,0); text runs expand to per-glyph quads from the atlas).
+fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out: []text_gpu.Quad) !usize {
+    var n: usize = 0;
+    for (cmds) |c| {
+        switch (c) {
+            .rect => |r| {
+                if (n >= out.len) return error.TooManyQuads;
+                out[n] = .{
+                    .x = r.rect.x,
+                    .y = r.rect.y,
+                    .w = r.rect.w,
+                    .h = r.rect.h,
+                    .u0 = 0,
+                    .v0 = 0,
+                    .u1 = 0,
+                    .v1 = 0,
+                    .color = rgba01(r.color),
+                };
+                n += 1;
+            },
+            .text => |t| {
+                var pen = t.x;
+                const col = rgba01(t.color);
+                var i: usize = 0;
+                while (i < t.str.len) {
+                    const d = atlas_mod.TextAtlas.decodeUtf8(t.str[i..]) orelse {
+                        i += 1;
+                        continue;
+                    };
+                    const g = try atlas.glyph(d.cp);
+                    if (g.w > 0 and g.h > 0) {
+                        if (n >= out.len) return error.TooManyQuads;
+                        const aw = @as(f32, @floatFromInt(atlas.atlas_w));
+                        const ah = @as(f32, @floatFromInt(atlas.atlas_h));
+                        out[n] = .{
+                            .x = pen + g.bearing_x,
+                            .y = t.baseline - g.top,
+                            .w = @floatFromInt(g.w),
+                            .h = @floatFromInt(g.h),
+                            .u0 = @as(f32, @floatFromInt(g.atlas_x)) / aw,
+                            .v0 = @as(f32, @floatFromInt(g.atlas_y)) / ah,
+                            .u1 = @as(f32, @floatFromInt(g.atlas_x + g.w)) / aw,
+                            .v1 = @as(f32, @floatFromInt(g.atlas_y + g.h)) / ah,
+                            .color = col,
+                        };
+                        n += 1;
+                    }
+                    pen += g.advance;
+                    i += d.len;
+                }
+            },
+        }
+    }
+    return n;
+}
 
 pub const Error = types.Error;
 
@@ -180,19 +266,35 @@ pub const Application = struct {
         var shm_buf = try wayland.ShmBuffer.allocate(width, height);
         defer shm_buf.deinit();
 
-        // GPU path (optional): render frames on the Vulkan device when an ICD
-        // is available; otherwise fall back to the software rasterizer below.
-        // Frame bytes come back as BGRA == wl_shm ARGB8888 little-endian.
+        // GPU UI path (optional): Vulkan device + text atlas + immediate-mode
+        // UI rendered as quads through the text pipeline, copied into wl_shm.
+        // Falls back to the software rasterizer when no ICD/font is available.
         var vk: device.Vulkan = undefined;
         var dev: device.Device = .{};
-        var pipe: ?frame.FramePipeline = null;
+        var gt: ?text_gpu.GpuText = null;
+        var atlas: ?atlas_mod.TextAtlas = null;
+        var ui: ?ui_mod.Ui = null;
         if (device.load()) |v| {
             vk = v;
             if (device.createDevice(&vk, &dev)) |_| {
-                pipe = frame.FramePipeline.init(&vk, &dev, width, height) catch null;
+                if (readFileAlloc(FONT_PATH, std.heap.page_allocator)) |font_data| {
+                    if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, UI_PX)) |a| {
+                        atlas = a;
+                        if (text_gpu.GpuText.init(&vk, &dev, width, height, a.atlas_w, a.atlas_h)) |g| {
+                            gt = g;
+                            gt.?.uploadAtlas(&vk, &dev, a.atlas) catch {
+                                gt = null;
+                            };
+                        } else |_| {}
+                    } else |_| {}
+                    if (gt != null) {
+                        ui = ui_mod.Ui.init(std.heap.page_allocator, &atlas.?);
+                    }
+                } else |_| {}
             } else |_| {}
         } else |_| {}
-        std.debug.print("sifr: render path = {s}\n", .{if (pipe != null) "vulkan-gpu" else "software-shm"});
+        const gpu_ui = ui != null and gt != null;
+        std.debug.print("sifr: render path = {s}\n", .{if (gpu_ui) "vulkan-gpu-ui" else "software-shm"});
 
         // Create shm pool and buffer
         ids.shm_pool = ids.new();
@@ -226,22 +328,51 @@ pub const Application = struct {
         var frame_index: u32 = 0;
         var quit_requested: bool = false;
         const frame_count: u32 = 24;
+        var clicks: u32 = 0;
+        var mouse_x: f32 = 0;
+        var mouse_y: f32 = 0;
+        var mouse_down: bool = false;
+        var mouse_pressed: bool = false;
 
         while (frame_index < frame_count and !quit_requested) : (frame_index += 1) {
             const cy = @as(usize, @intCast(height)) / 2;
             const cx = @as(usize, @intCast(width)) / 2;
             const r: usize = 12;
 
-            if (pipe) |*p| {
-                // GPU: graphics pipeline renders the frame, copy lands in the
-                // host-visible buffer, then straight into wl_shm.
-                const t = @as(u32, @intCast(frame_index));
-                p.render(&vk, &dev, @intCast(cx + @as(usize, t) * 2), @intCast(cy), @intCast(r)) catch {
-                    std.debug.print("sifr: gpu render failed, falling back to software\n", .{});
-                    pipe = null;
+            if (ui != null and gt != null) {
+                // GPU UI: declare widgets, lay out, render quads, copy to shm.
+                var clicks_buf: [40]u8 = undefined;
+                const clicks_str = std.fmt.bufPrint(&clicks_buf, "Clicks: {d}", .{clicks}) catch "Clicks: ?";
+                var u = &ui.?;
+                u.begin(@floatFromInt(width), @floatFromInt(height), mouse_x, mouse_y, mouse_down, mouse_pressed) catch {
+                    ui = null;
                     continue;
                 };
-                @memcpy(shm_buf.pixels, p.pixels());
+                u.panel(.{ .fixed = 340 }, .{ .fixed = 190 }, 16, 10) catch {
+                    ui = null;
+                    continue;
+                };
+                u.label("Cipher — native GPU UI", ui_mod.COLOR_TEXT) catch {};
+                u.label(clicks_str, ui_mod.COLOR_TEXT_DIM) catch {};
+                if (u.button("Click me") catch false) clicks += 1;
+                u.endPanel();
+                u.end() catch {
+                    ui = null;
+                    continue;
+                };
+                var quads: [4096]text_gpu.Quad = undefined;
+                const n = buildQuads(&atlas.?, u.drawCmds(), &quads) catch {
+                    ui = null;
+                    continue;
+                };
+                gt.?.render(&vk, &dev, quads[0..n]) catch {
+                    std.debug.print("sifr: gpu render failed, falling back to software\n", .{});
+                    ui = null;
+                    gt = null;
+                    continue;
+                };
+                @memcpy(shm_buf.pixels, gt.?.pixels());
+                mouse_pressed = false;
             } else {
                 // Software fallback: clear to void, draw a brass center dot.
                 var pixels: [640 * 400]u32 = undefined;
@@ -296,11 +427,11 @@ pub const Application = struct {
                     frame_done = true;
                 }
 
-                // Keyboard quit: Escape or q
+                // Keyboard quit: Escape or q (key event: time@0, key@1, state@2)
                 if (ids.keyboard != null and event.sender == ids.keyboard.?) {
                     if (event.opcode == 3) {
-                        const key = event.read32(2);
-                        const state = event.read32(3);
+                        const key = event.read32(1);
+                        const state = event.read32(2);
                         if (state == 1 and (key == 1 or key == 16)) {
                             quit_requested = true;
                             frame_done = true;
@@ -308,17 +439,23 @@ pub const Application = struct {
                     }
                 }
 
-                // Pointer motion/buttons
+                // Pointer: motion (time@0, x@1, y@2 fixed24.8), button (time@0, button@1, state@2)
                 if (ids.pointer != null and event.sender == ids.pointer.?) {
                     switch (event.opcode) {
                         2 => {
-                            // pointer motion
+                            mouse_x = @floatCast(event.fixed24_8(1));
+                            mouse_y = @floatCast(event.fixed24_8(2));
                         },
                         3 => {
-                            const button = event.read32(2);
-                            const state = event.read32(3);
-                            if (button == 0x110 and state == 1) { // BTN_LEFT pressed
-                                std.debug.print("pointer: button left press\n", .{});
+                            const button = event.read32(1);
+                            const state = event.read32(2);
+                            if (button == 0x110) { // BTN_LEFT
+                                if (state == 1) {
+                                    mouse_down = true;
+                                    mouse_pressed = true;
+                                } else {
+                                    mouse_down = false;
+                                }
                             }
                         },
                         else => {},

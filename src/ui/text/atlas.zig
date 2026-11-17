@@ -33,15 +33,21 @@ pub const TextAtlas = struct {
 
     pub fn init(allocator: std.mem.Allocator, font_data: []const u8, px_size: f32) !TextAtlas {
         const f = try font.Font.load(font_data);
+        // Reserve texel (0,0) as solid white: rect quads sample uv=(0,0) with
+        // coverage 1.0 -> exact solid color from the vertex color.
+        // (shelf packing starts at (1,1), so (0,0) stays free)
         const w: u32 = 1024;
         const h: u32 = 1024;
+        const atlas_buf = try allocator.alloc(u8, @as(usize, w) * h);
+        @memset(atlas_buf, 0);
+        atlas_buf[0] = 255;
         return .{
+            .atlas = atlas_buf,
             .allocator = allocator,
             .font = f,
             .font_data = font_data,
             .px_size = px_size,
             .scale = px_size / @as(f32, @floatFromInt(f.units_per_em)),
-            .atlas = try allocator.alloc(u8, @as(usize, w) * h),
             .atlas_w = w,
             .atlas_h = h,
             .cache = std.AutoHashMap(u32, GlyphInfo).init(allocator),
