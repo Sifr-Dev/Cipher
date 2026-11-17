@@ -39,7 +39,7 @@ test "truecolor 38;2;r;g;b" {
     defer g.deinit();
     var p = vt.Parser{};
     try feed(&g, &p, "\x1b[38;2;10;20;30mX");
-    try std.testing.expectEqual(@as(u32, 0xFF0A141E), g.lineAt(0).cells[0].fg);
+    try std.testing.expectEqual(@as(u32, 0x020A141E), g.lineAt(0).cells[0].fg);
     std.debug.print("VT_TRUECOLOR_OK\n", .{});
 }
 

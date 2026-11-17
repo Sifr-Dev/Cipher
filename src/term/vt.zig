@@ -283,7 +283,7 @@ pub const Parser = struct {
                         const r: u32 = @intCast(self.csi_params[i + 2] & 0xFF);
                         const gg: u32 = @intCast(self.csi_params[i + 3] & 0xFF);
                         const b: u32 = @intCast(self.csi_params[i + 4] & 0xFF);
-                        g.cur_fg = 0xFF000000 | (r << 16) | (gg << 8) | b;
+                        g.cur_fg = grid_mod.TRUECOLOR_FLAG | (r << 16) | (gg << 8) | b;
                         i += 4;
                     }
                 },
@@ -297,7 +297,7 @@ pub const Parser = struct {
                         const r: u32 = @intCast(self.csi_params[i + 2] & 0xFF);
                         const gg: u32 = @intCast(self.csi_params[i + 3] & 0xFF);
                         const b: u32 = @intCast(self.csi_params[i + 4] & 0xFF);
-                        g.cur_bg = 0xFF000000 | (r << 16) | (gg << 8) | b;
+                        g.cur_bg = grid_mod.TRUECOLOR_FLAG | (r << 16) | (gg << 8) | b;
                         i += 4;
                     }
                 },

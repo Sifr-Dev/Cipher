@@ -21,6 +21,7 @@ pub const Pane = struct {
     title: [256]u8 = undefined,
     title_len: usize = 0,
     alive: bool = true,
+    zombie: bool = false, // marked by op close; swept after the poll iteration
     replay: std.ArrayList(u8), // raw output ring for attach
     last_output_ns: i64 = 0,
     wait: ?WaitState = null,
@@ -179,7 +180,7 @@ pub const Server = struct {
                 const out_text = try p.grid.captureText(self.allocator, false);
                 const code: i32 = if (p.pty.exited) @intCast((@as(u32, @bitCast(p.pty.exit_status)) >> 8) & 0xFF) else -1;
                 const entries = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } }, .{ .key = "pane", .value = .{ .num = @floatFromInt(p.id) } }, .{ .key = "output", .value = .{ .str = out_text } }, .{ .key = "exit_code", .value = .{ .num = @floatFromInt(code) } }, .{ .key = "timed_out", .value = .{ .bool = expired and !dead } } });
-                try self.reply(w.client, .{ .obj = entries });
+                self.reply(w.client, .{ .obj = entries }) catch {};
                 self.allocator.free(w.cmd);
                 p.wait = null;
             }
@@ -198,7 +199,7 @@ pub const Server = struct {
         defer json.freeValue(self.allocator, v);
         const op = if (v.get("op")) |o| o.strOf() orelse "" else "";
         if (std.mem.eql(u8, op, "hello")) {
-            const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } }, .{ .key = "server", .value = .{ .str = "cipher-rex" } }, .{ .key = "version", .value = .{ .num = 1 } } });
+            const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } }, .{ .key = "server", .value = try self.vstr("cipher-rex") }, .{ .key = "version", .value = .{ .num = 1 } } });
             try self.reply(c, .{ .obj = e });
         } else if (std.mem.eql(u8, op, "ls")) {
             try self.opLs(c);
@@ -227,6 +228,12 @@ pub const Server = struct {
         }
     }
 
+    /// Heap-owned string Value. reply() frees the whole tree, so literals
+    /// must never appear as .str payloads — always dupe.
+    fn vstr(self: *Server, s: []const u8) !json.Value {
+        return .{ .str = try self.allocator.dupe(u8, s) };
+    }
+
     fn makeObj(self: *Server, entries: []const json.Value.Entry) ![]json.Value.Entry {
         const slice = try self.allocator.alloc(json.Value.Entry, entries.len);
         for (entries, 0..) |e, i| {
@@ -244,7 +251,7 @@ pub const Server = struct {
     }
 
     fn replyErr(self: *Server, c: *Client, msg: []const u8) !void {
-        const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = false } }, .{ .key = "error", .value = .{ .str = msg } } });
+        const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = false } }, .{ .key = "error", .value = try self.vstr(msg) } });
         try self.reply(c, .{ .obj = e });
     }
 
@@ -310,7 +317,7 @@ pub const Server = struct {
         const data = v.get("data") orelse return self.replyErr(c, "missing data");
         const s = data.strOf() orelse return self.replyErr(c, "data must be a string");
         if (!p.alive) return self.replyErr(c, "pane dead");
-        try p.pty.write(s);
+        p.pty.write(s) catch return self.replyErr(c, "write failed (pane dead?)");
         const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } } });
         try self.reply(c, .{ .obj = e });
     }
@@ -352,8 +359,8 @@ pub const Server = struct {
         const cmd = cmd_v.strOf() orelse return self.replyErr(c, "cmd must be a string");
         if (!p.alive) return self.replyErr(c, "pane dead");
         // send command + Enter
-        try p.pty.write(cmd);
-        try p.pty.write("\n");
+        p.pty.write(cmd) catch return self.replyErr(c, "write failed (pane dead?)");
+        p.pty.write("\n") catch return self.replyErr(c, "write failed (pane dead?)");
         const wait = if (v.get("wait")) |w| w.* == .bool and w.bool else false;
         if (wait) {
             if (p.wait != null) return self.replyErr(c, "pane already running a wait");
@@ -388,8 +395,11 @@ pub const Server = struct {
 
     fn opClose(self: *Server, c: *Client, v: json.Value) !void {
         const id = paneIdOf(v) orelse return self.replyErr(c, "missing pane");
-        if (self.findPane(id) == null) return self.replyErr(c, "no such pane");
-        self.removePane(id);
+        const p = self.findPane(id) orelse return self.replyErr(c, "no such pane");
+        // Defer actual teardown: the poll loop holds index snapshots of
+        // self.panes for this iteration, so removing here would corrupt them.
+        p.zombie = true;
+        p.alive = false;
         const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } } });
         try self.reply(c, .{ .obj = e });
     }
@@ -400,8 +410,29 @@ pub const Server = struct {
         c.attach_pane = id;
         const b64 = try json.base64Encode(self.allocator, p.replay.items);
         defer self.allocator.free(b64);
-        const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } }, .{ .key = "event", .value = .{ .str = "attach" } }, .{ .key = "pane", .value = .{ .num = @floatFromInt(id) } }, .{ .key = "cols", .value = .{ .num = @floatFromInt(p.grid.cols) } }, .{ .key = "rows", .value = .{ .num = @floatFromInt(p.grid.rows) } }, .{ .key = "replay", .value = .{ .str = b64 } }, .{ .key = "alive", .value = .{ .bool = p.alive } } });
+        const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } }, .{ .key = "event", .value = try self.vstr("attach") }, .{ .key = "pane", .value = .{ .num = @floatFromInt(id) } }, .{ .key = "cols", .value = .{ .num = @floatFromInt(p.grid.cols) } }, .{ .key = "rows", .value = .{ .num = @floatFromInt(p.grid.rows) } }, .{ .key = "replay", .value = .{ .str = b64 } }, .{ .key = "alive", .value = .{ .bool = p.alive } } });
         try self.reply(c, .{ .obj = e });
+    }
+
+    /// Tear down panes marked zombie by op close. Called after each poll
+    /// iteration (never from inside handleLine, which would corrupt the
+    /// loop's index snapshots).
+    pub fn sweepZombies(self: *Server) void {
+        var zi: usize = 0;
+        while (zi < self.panes.items.len) {
+            const p = self.panes.items[zi];
+            if (p.zombie) {
+                if (p.wait) |w| {
+                    self.allocator.free(w.cmd);
+                    p.wait = null;
+                }
+                p.pty.deinit();
+                p.grid.deinit();
+                p.replay.deinit(self.allocator);
+                self.allocator.destroy(p);
+                _ = self.panes.orderedRemove(zi);
+            } else zi += 1;
+        }
     }
 
     // ---- socket loop ----
@@ -415,7 +446,9 @@ pub const Server = struct {
             var client_idx = std.ArrayList(usize).empty;
             defer client_idx.deinit(self.allocator);
             for (self.clients.items, 0..) |c, i| {
-                try fds.append(self.allocator, .{ .fd = c.fd, .events = std.os.linux.POLL.IN | (if (c.out_buf.items.len > 0) std.os.linux.POLL.OUT else 0), .revents = 0 });
+                var ev: i16 = @intCast(std.os.linux.POLL.IN);
+                if (c.out_buf.items.len > 0) ev |= @intCast(std.os.linux.POLL.OUT);
+                try fds.append(self.allocator, .{ .fd = c.fd, .events = ev, .revents = 0 });
                 try client_idx.append(self.allocator, i);
             }
             var pane_idx = std.ArrayList(usize).empty;
@@ -456,7 +489,7 @@ pub const Server = struct {
                 if (re & std.os.linux.POLL.IN != 0) {
                     var buf: [65536]u8 = undefined;
                     while (true) {
-                        const n_rc = std.os.linux.read(c.fd, buf.ptr, buf.len);
+                        const n_rc = std.os.linux.read(c.fd, &buf, buf.len);
                         if (@as(i64, @bitCast(n_rc)) < 0) break;
                         const n: usize = @intCast(n_rc);
                         if (n == 0) {
@@ -472,7 +505,9 @@ pub const Server = struct {
                         // shift
                         std.mem.copyForwards(u8, c.in_buf.items[0 .. c.in_buf.items.len - nl - 1], c.in_buf.items[nl + 1 ..]);
                         c.in_buf.items = c.in_buf.items[0 .. c.in_buf.items.len - nl - 1];
-                        try self.handleLine(c, line);
+                        self.handleLine(c, line) catch |e| {
+                            self.replyErr(c, @errorName(e)) catch {};
+                        };
                     }
                 }
                 if (re & std.os.linux.POLL.OUT != 0 or c.out_buf.items.len > 0) {
@@ -484,6 +519,15 @@ pub const Server = struct {
             while (i < self.clients.items.len) {
                 if (self.clients.items[i].closed) {
                     const c = self.clients.items[i];
+                    // a closed client must not be referenced by a pending run --wait
+                    for (self.panes.items) |p| {
+                        if (p.wait) |w| {
+                            if (w.client == c) {
+                                self.allocator.free(w.cmd);
+                                p.wait = null;
+                            }
+                        }
+                    }
                     c.in_buf.deinit(self.allocator);
                     c.out_buf.deinit(self.allocator);
                     _ = std.os.linux.close(c.fd);
@@ -494,15 +538,21 @@ pub const Server = struct {
             // panes
             var pi: usize = 1 + client_idx.items.len;
             for (pane_idx.items) |pidx| {
+                if (pidx >= self.panes.items.len) break;
                 const p = self.panes.items[pidx];
                 const re = fds.items[pi].revents;
                 pi += 1;
+                if (p.zombie) continue;
                 if (re & std.os.linux.POLL.IN != 0) {
-                    try self.pumpPane(p);
+                    self.pumpPane(p) catch |e| {
+                        std.debug.print("rex: pumpPane error {s} (pane {d})\n", .{ @errorName(e), p.id });
+                        p.alive = false;
+                    };
                 }
                 p.pty.pollExit();
                 if (p.pty.exited) p.alive = false;
             }
+            self.sweepZombies();
             try self.checkWaits();
         }
     }
@@ -604,7 +654,189 @@ test "server: spawn sh, run --wait captures output, ls/capture/close work" {
     alloc.free(rep);
     rep = try drainReplies(&srv, c);
     try std.testing.expect(std.mem.indexOf(u8, rep, "\"ok\":true") != null);
+    srv.sweepZombies(); // the poll loop normally does this after the iteration
     try std.testing.expectEqual(@as(usize, 0), srv.panes.items.len);
     std.debug.print("SERVER_CLOSE_OK\n", .{});
     alloc.free(rep);
+}
+
+
+// ---- real-socket end-to-end regression test ----
+
+fn sockConnect(path: []const u8) !i32 {
+    const fd_rc = std.os.linux.socket(std.os.linux.AF.UNIX, std.os.linux.SOCK.STREAM | std.os.linux.SOCK.CLOEXEC, 0);
+    if (@as(i64, @bitCast(fd_rc)) < 0) return error.SocketFailed;
+    const fd: i32 = @intCast(fd_rc);
+    var addr: std.os.linux.sockaddr.un = undefined;
+    @memset(std.mem.asBytes(&addr), 0);
+    addr.family = std.os.linux.AF.UNIX;
+    if (path.len >= addr.path.len) return error.NameTooLong;
+    @memcpy(addr.path[0..path.len], path);
+    const rc = std.os.linux.connect(fd, @ptrCast(&addr), @sizeOf(std.os.linux.sockaddr.un));
+    if (@as(i64, @bitCast(rc)) < 0) {
+        _ = std.os.linux.close(fd);
+        return error.ConnectFailed;
+    }
+    return fd;
+}
+
+fn sockWriteAll(fd: i32, data: []const u8) !void {
+    var off: usize = 0;
+    while (off < data.len) {
+        const rc = std.os.linux.write(fd, data[off..].ptr, data.len - off);
+        if (@as(i64, @bitCast(rc)) < 0) return error.WriteFailed;
+        off += @intCast(rc);
+    }
+}
+
+fn sockReadLine(fd: i32, allocator: std.mem.Allocator, timeout_ms: i32) !?[]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    var buf: [4096]u8 = undefined;
+    var remaining: i32 = timeout_ms;
+    while (remaining > 0) {
+        var fds = [_]std.os.linux.pollfd{.{ .fd = fd, .events = std.os.linux.POLL.IN, .revents = 0 }};
+        const slice: i32 = 20;
+        const rc = std.os.linux.poll(&fds, 1, slice);
+        if (@as(i64, @bitCast(rc)) < 0) {
+            if (std.os.linux.errno(rc) == .INTR) continue;
+            return error.PollFailed;
+        }
+        remaining -= slice;
+        if (rc == 0) continue;
+        const n_rc = std.os.linux.read(fd, &buf, buf.len);
+        if (@as(i64, @bitCast(n_rc)) < 0) return error.ReadFailed;
+        const n: usize = @intCast(n_rc);
+        if (n == 0) break;
+        if (std.mem.indexOfScalar(u8, buf[0..n], '\n')) |nl| {
+            try out.appendSlice(allocator, buf[0..nl]);
+            const r = try out.toOwnedSlice(allocator);
+            return r;
+        }
+        try out.appendSlice(allocator, buf[0..n]);
+    }
+    if (out.items.len > 0) {
+        const r = try out.toOwnedSlice(allocator);
+        return r;
+    }
+    return null;
+}
+
+test "server e2e over real socket: spawn, run --wait, capture, close, ls — server survives close" {
+    const alloc = std.testing.allocator;
+    const path = "/tmp/cipher-rex-e2e.sock";
+    var srv = try Server.init(alloc, path);
+    const t = try std.Thread.spawn(.{}, struct {
+        fn runit(s: *Server) void {
+            s.run() catch {};
+        }
+    }.runit, .{&srv});
+    defer {
+        srv.running = false;
+        t.join();
+        srv.deinit();
+    }
+
+    var fd: i32 = -1;
+    const deadline = pty_mod.nowNs() + 3 * 1_000_000_000;
+    while (pty_mod.nowNs() < deadline) {
+        if (sockConnect(path)) |f| {
+            fd = f;
+            break;
+        } else |_| {
+            var ts = std.os.linux.timespec{ .sec = 0, .nsec = 20 * 1_000_000 };
+            _ = std.os.linux.nanosleep(&ts, null);
+        }
+    }
+    try std.testing.expect(fd >= 0);
+    defer _ = std.os.linux.close(fd);
+
+    // spawn
+    try sockWriteAll(fd, "{\"op\":\"spawn\",\"cmd\":[\"/bin/sh\"],\"cols\":80,\"rows\":24}\n");
+    const id = blk: {
+        const l = try sockReadLine(fd, alloc, 3000) orelse return error.NoReply;
+        defer alloc.free(l);
+        try std.testing.expect(std.mem.indexOf(u8, l, "\"ok\":true") != null);
+        const v = try json.Parser.parse(alloc, l);
+        defer json.freeValue(alloc, v);
+        break :blk @as(u32, @intFromFloat(v.get("id").?.num));
+    };
+    std.debug.print("E2E_SPAWN_OK id={d}\n", .{id});
+
+    // run --wait
+    {
+        var req: [128]u8 = undefined;
+        const r = try std.fmt.bufPrint(&req, "{{\"op\":\"run\",\"pane\":{d},\"cmd\":\"echo E2E_MARKER_7\",\"wait\":true}}", .{id});
+        try sockWriteAll(fd, r);
+        try sockWriteAll(fd, "\n");
+        const l = try sockReadLine(fd, alloc, 8000) orelse return error.NoReply;
+        defer alloc.free(l);
+        try std.testing.expect(std.mem.indexOf(u8, l, "E2E_MARKER_7") != null);
+        std.debug.print("E2E_RUN_WAIT_OK\n", .{});
+    }
+
+    // capture (scrollback includes the marker)
+    {
+        var req: [96]u8 = undefined;
+        const r = try std.fmt.bufPrint(&req, "{{\"op\":\"capture\",\"pane\":{d},\"scrollback\":true}}", .{id});
+        try sockWriteAll(fd, r);
+        try sockWriteAll(fd, "\n");
+        const l = try sockReadLine(fd, alloc, 3000) orelse return error.NoReply;
+        defer alloc.free(l);
+        try std.testing.expect(std.mem.indexOf(u8, l, "E2E_MARKER_7") != null);
+        std.debug.print("E2E_CAPTURE_OK\n", .{});
+    }
+
+    // close, then ls on the SAME connection: before the zombie fix the server
+    // crashed here (stale pane indices in the poll loop)
+    {
+        var req: [64]u8 = undefined;
+        const r = try std.fmt.bufPrint(&req, "{{\"op\":\"close\",\"pane\":{d}}}", .{id});
+        try sockWriteAll(fd, r);
+        try sockWriteAll(fd, "\n");
+        const l = try sockReadLine(fd, alloc, 3000) orelse return error.NoReply;
+        defer alloc.free(l);
+        try std.testing.expect(std.mem.indexOf(u8, l, "\"ok\":true") != null);
+    }
+    {
+        try sockWriteAll(fd, "{\"op\":\"ls\"}\n");
+        const l = try sockReadLine(fd, alloc, 3000) orelse return error.NoReply;
+        defer alloc.free(l);
+        try std.testing.expect(std.mem.indexOf(u8, l, "\"panes\":[]") != null);
+        std.debug.print("E2E_CLOSE_THEN_LS_OK server alive after close\n", .{});
+    }
+
+    // spawn again to prove the server keeps working
+    {
+        try sockWriteAll(fd, "{\"op\":\"spawn\",\"cmd\":[\"/bin/sh\"],\"cols\":80,\"rows\":24}\n");
+        const l = try sockReadLine(fd, alloc, 3000) orelse return error.NoReply;
+        defer alloc.free(l);
+        try std.testing.expect(std.mem.indexOf(u8, l, "\"ok\":true") != null);
+        std.debug.print("E2E_RESPAWN_OK\n", .{});
+    }
+    // regression: ops on a dead pane must reply error, not kill the server
+    {
+        try sockWriteAll(fd, "{\"op\":\"spawn\",\"cmd\":[\"/nonexistent-binary-xyz\"],\"cols\":40,\"rows\":10}\n");
+        const l0 = try sockReadLine(fd, alloc, 3000) orelse return error.NoReply;
+        defer alloc.free(l0);
+        const v0 = try json.Parser.parse(alloc, l0);
+        defer json.freeValue(alloc, v0);
+        const dead_id: u32 = @as(u32, @intFromFloat(v0.get("id").?.num));
+        // give the child a moment to die
+        var ts = std.os.linux.timespec{ .sec = 0, .nsec = 300 * 1_000_000 };
+        _ = std.os.linux.nanosleep(&ts, null);
+        var req: [160]u8 = undefined;
+        const r = try std.fmt.bufPrint(&req, "{{\"op\":\"run\",\"pane\":{d},\"cmd\":\"echo x\",\"wait\":true}}", .{dead_id});
+        try sockWriteAll(fd, r);
+        try sockWriteAll(fd, "\n");
+        const l = try sockReadLine(fd, alloc, 9000) orelse return error.NoReply;
+        defer alloc.free(l);
+        try std.testing.expect(std.mem.indexOf(u8, l, "\"ok\"") != null); // an error reply, any
+        // server still alive?
+        try sockWriteAll(fd, "{\"op\":\"ls\"}\n");
+        const l2 = try sockReadLine(fd, alloc, 3000) orelse return error.NoReply;
+        defer alloc.free(l2);
+        try std.testing.expect(std.mem.indexOf(u8, l2, "\"panes\"") != null);
+        std.debug.print("E2E_DEAD_PANE_OK server survived dead-pane ops\n", .{});
+    }
 }

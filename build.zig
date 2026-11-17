@@ -48,6 +48,30 @@ pub fn build(b: *std.Build) void {
     const run_hello_step = b.step("run-hello", "Run the cipher hello app (Esc quits)");
     run_hello_step.dependOn(&run_hello.step);
 
+    // rex-clone: term API module + scriptable CLI + server.
+    const term_mod = b.createModule(.{
+        .root_source_file = b.path("src/term_api.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    term_mod.link_libc = true;
+
+    const rex_mod = b.createModule(.{
+        .root_source_file = b.path("apps/rex.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    rex_mod.link_libc = true;
+    rex_mod.addImport("term", term_mod);
+    const rex = b.addExecutable(.{
+        .name = "rex",
+        .root_module = rex_mod,
+    });
+    b.installArtifact(rex);
+    const run_rex = b.addRunArtifact(rex);
+    const run_rex_step = b.step("run-rex", "Run the rex CLI (args after --)");
+    run_rex_step.dependOn(&run_rex.step);
+
     const test_step = b.step("test", "Run all tests");
     const units = .{
         .{ "src/core/types.zig", "core_types" },

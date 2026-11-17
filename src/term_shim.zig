@@ -6,4 +6,5 @@ test {
     _ = @import("term/pty.zig");
     _ = @import("term/server.zig");
     _ = @import("term/json.zig");
+    _ = @import("term/render.zig");
 }

@@ -197,6 +197,11 @@ pub const Parser = struct {
     }
 };
 
+/// Public wrapper so external modules (CLI pretty-printer) can stream values.
+pub fn writeValueIntoPub(out: *std.ArrayList(u8), allocator: std.mem.Allocator, v: Value) !void {
+    try writeValueInto(out, allocator, v);
+}
+
 pub fn writeValue(allocator: std.mem.Allocator, v: Value) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);

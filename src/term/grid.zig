@@ -8,10 +8,11 @@ const std = @import("std");
 
 /// Color encoding in Cell.fg/bg:
 ///   0                 -> theme default
-///   0xAARRGGBB        -> direct RGB (alpha forced opaque by renderer)
-///   0x8000_0000|idx   -> xterm 256-palette index
+///   0x01_000000|idx   -> xterm 256-palette index
+///   0x02_RRGGBB       -> direct 24-bit RGB (renderer forces opaque)
 pub const DEFAULT_COLOR: u32 = 0;
-pub const PALETTE_FLAG: u32 = 0x8000_0000;
+pub const PALETTE_FLAG: u32 = 0x0100_0000;
+pub const TRUECOLOR_FLAG: u32 = 0x0200_0000;
 
 pub const Attr = packed struct(u8) {
     bold: bool = false,
@@ -37,6 +38,7 @@ pub const Grid = struct {
     cols: u32,
     rows: u32,
     ring: []Line, // fixed capacity = rows + scrollback_max
+    cell_slab: []Cell = &.{}, // ONE alloc backing every ring line's cells
     view_buf: []Line, // scratch: viewport line pointers (screenLines)
     head: usize = 0, // ring slot of the oldest valid line
     count: usize = 0, // number of valid lines
@@ -50,29 +52,29 @@ pub const Grid = struct {
     cur_attrs: Attr = .{},
     cur_fg: u32 = DEFAULT_COLOR,
     cur_bg: u32 = DEFAULT_COLOR,
-    scrollback_max: usize = 100_000,
+    scrollback_max: usize = 10_000, // ring allocates capacity upfront: 10k lines x 100 cols x 16B = 16MB/pane
     alt: ?*Grid = null,
     saved_cursor: struct { cx: u32 = 0, cy: u32 = 0, fg: u32 = 0, bg: u32 = 0, attrs: Attr = .{} } = .{},
     cursor_visible: bool = true,
     bracketed_paste: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, cols: u32, rows: u32) !Grid {
-        return initCapacity(allocator, cols, rows, 100_000);
+        return initCapacity(allocator, cols, rows, 10_000);
     }
 
     pub fn initCapacity(allocator: std.mem.Allocator, cols: u32, rows: u32, scrollback_max: usize) !Grid {
         const cap = rows + scrollback_max;
         const ring = try allocator.alloc(Line, cap);
-        for (ring) |*l| {
-            l.cells = try allocator.alloc(Cell, cols);
-            @memset(l.cells, .{});
-        }
+        const slab = try allocator.alloc(Cell, cap * @as(usize, cols));
+        @memset(slab, .{});
+        for (ring, 0..) |*l, i| l.cells = slab[i * @as(usize, cols) .. (i + 1) * @as(usize, cols)];
         const view_buf = try allocator.alloc(Line, rows);
         var g = Grid{
             .allocator = allocator,
             .cols = cols,
             .rows = rows,
             .ring = ring,
+            .cell_slab = slab,
             .view_buf = view_buf,
             .scroll_bottom = rows - 1,
             .scrollback_max = scrollback_max,
@@ -84,7 +86,7 @@ pub const Grid = struct {
     }
 
     pub fn deinit(self: *Grid) void {
-        for (self.ring) |l| self.allocator.free(l.cells);
+        self.allocator.free(self.cell_slab);
         self.allocator.free(self.ring);
         self.allocator.free(self.view_buf);
         if (self.alt) |a| {
@@ -394,12 +396,12 @@ pub const Grid = struct {
         // fresh ring for the alt screen
         const cap = self.rows; // alt screen has no scrollback
         const ring = try self.allocator.alloc(Line, cap);
-        for (ring) |*l| {
-            l.cells = try self.allocator.alloc(Cell, self.cols);
-            @memset(l.cells, .{});
-        }
+        const slab = try self.allocator.alloc(Cell, cap * @as(usize, self.cols));
+        @memset(slab, .{});
+        for (ring, 0..) |*l, i| l.cells = slab[i * @as(usize, self.cols) .. (i + 1) * @as(usize, self.cols)];
         const vb = try self.allocator.alloc(Line, self.rows);
         self.view_buf = vb;
+        self.cell_slab = slab;
         self.ring = ring;
         self.head = 0;
         self.count = self.rows;
@@ -414,7 +416,7 @@ pub const Grid = struct {
 
     pub fn leaveAltScreen(self: *Grid) void {
         const main = self.alt orelse return;
-        for (self.ring) |l| self.allocator.free(l.cells);
+        self.allocator.free(self.cell_slab);
         self.allocator.free(self.ring);
         self.allocator.free(self.view_buf);
         self.* = main.*;
