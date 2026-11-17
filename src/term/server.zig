@@ -138,7 +138,14 @@ pub const Server = struct {
         while (true) {
             const n = p.pty.read(&buf) catch break; // WouldBlock or EOF -> stop
             if (n == 0) {
-                p.alive = false;
+                if (p.alive) {
+                    p.alive = false;
+                    for (self.clients.items) |cl| {
+                        if (cl.attach_pane == p.id and !cl.closed) {
+                            cl.out_buf.print(self.allocator, "{{\"event\":\"exit\",\"pane\":{d}}}\n", .{p.id}) catch {};
+                        }
+                    }
+                }
                 break;
             }
             p.last_output_ns = pty_mod.nowNs();
@@ -391,6 +398,12 @@ pub const Server = struct {
         p.parser = .{};
         const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } }, .{ .key = "cols", .value = .{ .num = cols } }, .{ .key = "rows", .value = .{ .num = rows } } });
         try self.reply(c, .{ .obj = e });
+        // tell attached clients so they can resize their mirror grids
+        for (self.clients.items) |cl| {
+            if (cl.attach_pane == p.id and !cl.closed) {
+                try cl.out_buf.print(self.allocator, "{{\"event\":\"resize\",\"pane\":{d},\"cols\":{d},\"rows\":{d}}}\n", .{ p.id, cols, rows });
+            }
+        }
     }
 
     fn opClose(self: *Server, c: *Client, v: json.Value) !void {
@@ -409,7 +422,7 @@ pub const Server = struct {
         const p = self.findPane(id) orelse return self.replyErr(c, "no such pane");
         c.attach_pane = id;
         const b64 = try json.base64Encode(self.allocator, p.replay.items);
-        defer self.allocator.free(b64);
+        // NOTE: no defer free — reply() frees the value tree, which owns b64
         const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } }, .{ .key = "event", .value = try self.vstr("attach") }, .{ .key = "pane", .value = .{ .num = @floatFromInt(id) } }, .{ .key = "cols", .value = .{ .num = @floatFromInt(p.grid.cols) } }, .{ .key = "rows", .value = .{ .num = @floatFromInt(p.grid.rows) } }, .{ .key = "replay", .value = .{ .str = b64 } }, .{ .key = "alive", .value = .{ .bool = p.alive } } });
         try self.reply(c, .{ .obj = e });
     }
@@ -550,7 +563,14 @@ pub const Server = struct {
                     };
                 }
                 p.pty.pollExit();
-                if (p.pty.exited) p.alive = false;
+                if (p.pty.exited and p.alive) {
+                    p.alive = false;
+                    for (self.clients.items) |cl| {
+                        if (cl.attach_pane == p.id and !cl.closed) {
+                            cl.out_buf.print(self.allocator, "{{\"event\":\"exit\",\"pane\":{d}}}\n", .{p.id}) catch {};
+                        }
+                    }
+                } else if (p.pty.exited) p.alive = false;
             }
             self.sweepZombies();
             try self.checkWaits();
@@ -839,4 +859,91 @@ test "server e2e over real socket: spawn, run --wait, capture, close, ls — ser
         try std.testing.expect(std.mem.indexOf(u8, l2, "\"panes\"") != null);
         std.debug.print("E2E_DEAD_PANE_OK server survived dead-pane ops\n", .{});
     }
+}
+
+test "server e2e attach: replay ring + streamed output events, server survives" {
+    const alloc = std.testing.allocator;
+    const path = "/tmp/cipher-rex-attach-e2e.sock";
+    var srv = try Server.init(alloc, path);
+    const t = try std.Thread.spawn(.{}, struct {
+        fn runit(s: *Server) void {
+            s.run() catch {};
+        }
+    }.runit, .{&srv});
+    defer {
+        srv.running = false;
+        t.join();
+        srv.deinit();
+    }
+    var fd: i32 = -1;
+    const deadline = pty_mod.nowNs() + 3 * 1_000_000_000;
+    while (pty_mod.nowNs() < deadline) {
+        if (sockConnect(path)) |f| {
+            fd = f;
+            break;
+        } else |_| {
+            var ts = std.os.linux.timespec{ .sec = 0, .nsec = 20 * 1_000_000 };
+            _ = std.os.linux.nanosleep(&ts, null);
+        }
+    }
+    try std.testing.expect(fd >= 0);
+    defer _ = std.os.linux.close(fd);
+
+    try sockWriteAll(fd, "{\"op\":\"spawn\",\"cmd\":[\"/bin/sh\"],\"cols\":80,\"rows\":24}\n");
+    const l0 = try sockReadLine(fd, alloc, 3000) orelse return error.NoReply;
+    defer alloc.free(l0);
+    const v0 = try json.Parser.parse(alloc, l0);
+    defer json.freeValue(alloc, v0);
+    const id: u32 = @as(u32, @intFromFloat(v0.get("id").?.num));
+
+    // attach: first line must be the attach event with a replay field
+    {
+        var req: [64]u8 = undefined;
+        const r = try std.fmt.bufPrint(&req, "{{\"op\":\"attach\",\"pane\":{d}}}", .{id});
+        try sockWriteAll(fd, r);
+        try sockWriteAll(fd, "\n");
+        const l = try sockReadLine(fd, alloc, 5000) orelse return error.NoReply;
+        defer alloc.free(l);
+        try std.testing.expect(std.mem.indexOf(u8, l, "\"event\":\"attach\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, l, "\"replay\"") != null);
+        std.debug.print("E2E_ATTACH_REPLY_OK\n", .{});
+    }
+    // produce output; an {"event":"output"} line must stream (poll a few lines)
+    {
+        var req: [128]u8 = undefined;
+        const r = try std.fmt.bufPrint(&req, "{{\"op\":\"send\",\"pane\":{d},\"data\":\"echo ATTACH_STREAM_OK\\n\"}}", .{id});
+        try sockWriteAll(fd, r);
+        try sockWriteAll(fd, "\n");
+        var got_send_ok = false;
+        var got_output = false;
+        var tries: u32 = 0;
+        while (tries < 40 and !got_output) : (tries += 1) {
+            const l_opt = try sockReadLine(fd, alloc, 500);
+            const l = l_opt orelse break;
+            defer alloc.free(l);
+            if (std.mem.indexOf(u8, l, "\"ok\":true") != null) got_send_ok = true;
+            const v = json.Parser.parse(alloc, l) catch continue;
+            defer json.freeValue(alloc, v);
+            if (v.get("event")) |ev| {
+                if (std.mem.eql(u8, ev.strOf() orelse "", "output")) {
+                    if (v.get("data")) |d| {
+                        if (d.strOf()) |b64| {
+                            const raw = json.base64Decode(alloc, b64) catch continue;
+                            defer alloc.free(raw);
+                            if (std.mem.indexOf(u8, raw, "ATTACH_STREAM_OK") != null) got_output = true;
+                        }
+                    }
+                }
+            }
+        }
+        try std.testing.expect(got_send_ok);
+        try std.testing.expect(got_output);
+        std.debug.print("E2E_ATTACH_STREAM_OK\n", .{});
+    }
+    // server still alive afterwards
+    try sockWriteAll(fd, "{\"op\":\"ls\"}\n");
+    const l2 = try sockReadLine(fd, alloc, 3000) orelse return error.NoReply;
+    defer alloc.free(l2);
+    try std.testing.expect(std.mem.indexOf(u8, l2, "\"panes\"") != null);
+    std.debug.print("E2E_ATTACH_SERVER_ALIVE_OK\n", .{});
 }

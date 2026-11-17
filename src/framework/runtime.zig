@@ -171,6 +171,9 @@ pub const Runtime = struct {
     ui_state: ?ui_mod.Ui = null,
     font_data: ?[]u8 = null,
     quads_buf: []text_gpu.Quad,
+    /// App-provided extra quads appended after the UI quads each frame
+    /// (used by terminal renderers). present() consumes and clears it.
+    extra_quads: ?[]const text_gpu.Quad = null,
 
     // input state
     mouse_x: f32 = 0,
@@ -210,6 +213,7 @@ pub const Runtime = struct {
         self.pending_events = .empty;
         self.events_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         self.quads_buf = try std.heap.page_allocator.alloc(text_gpu.Quad, 65536);
+        self.extra_quads = null;
 
         // Registry roundtrip to collect globals.
         var ids = &self.ids;
@@ -772,7 +776,14 @@ pub const Runtime = struct {
                     };
                 }
                 if (self.ui_state != null) {
-                    const n = try buildQuads(&self.atlas.?, u.drawCmds(), self.quads_buf);
+                    var n = try buildQuads(&self.atlas.?, u.drawCmds(), self.quads_buf);
+                    if (self.extra_quads) |eq| {
+                        const room = self.quads_buf.len - n;
+                        const take = @min(eq.len, room);
+                        if (take > 0) @memcpy(self.quads_buf[n..][0..take], eq[0..take]);
+                        n += take;
+                    }
+                    self.extra_quads = null; // one frame only
                     try self.gt.?.render(&self.vk, &self.dev, self.quads_buf[0..n]);
                     const src = self.gt.?.pixels();
                     @memcpy(self.shm_buf.pixels[0..src.len], src);

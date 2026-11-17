@@ -6,3 +6,9 @@ pub const pty = @import("term/pty.zig");
 pub const grid = @import("term/grid.zig");
 pub const vt = @import("term/vt.zig");
 pub const render = @import("term/render.zig");
+// framework re-exports so apps can import everything from "term" alone
+// (a file may only belong to one module; render.zig already pulls these in)
+pub const runtime = @import("framework/runtime.zig");
+pub const input = @import("framework/input.zig");
+pub const gpu_text = @import("gpu/vulkan/text.zig");
+pub const atlas = @import("ui/text/atlas.zig");

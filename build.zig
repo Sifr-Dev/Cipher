@@ -72,6 +72,23 @@ pub fn build(b: *std.Build) void {
     const run_rex_step = b.step("run-rex", "Run the rex CLI (args after --)");
     run_rex_step.dependOn(&run_rex.step);
 
+    // rexterm: GPU terminal client (attaches to the rex server).
+    const rexterm_mod = b.createModule(.{
+        .root_source_file = b.path("apps/rexterm.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    rexterm_mod.link_libc = true;
+    rexterm_mod.addImport("term", term_mod);
+    const rexterm = b.addExecutable(.{
+        .name = "rexterm",
+        .root_module = rexterm_mod,
+    });
+    b.installArtifact(rexterm);
+    const run_rexterm = b.addRunArtifact(rexterm);
+    const run_rexterm_step = b.step("run-rexterm", "Run the rexterm GPU terminal client (args after --)");
+    run_rexterm_step.dependOn(&run_rexterm.step);
+
     const test_step = b.step("test", "Run all tests");
     const units = .{
         .{ "src/core/types.zig", "core_types" },
