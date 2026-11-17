@@ -107,6 +107,65 @@ pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out
     return offset + n;
 }
 
+/// CPU rasterizer for one GPU-shaped quad (solid rect when the UVs are the
+/// reserved (0,0)-(0,0) white texel, else an atlas-sampled glyph quad).
+/// Blends source-over into the ARGB8888 (0xAARRGGBB) shm framebuffer.
+/// Used only when no Vulkan device is available (CIPHER_FORCE_SOFTWARE=1
+/// or headless/driverless sessions).
+fn rasterQuad(px: []u32, fb_w: u32, fb_h: u32, q: text_gpu.Quad, atlas: []const u8, atlas_w: u32, atlas_h: u32) void {
+    const solid = q.u0 == 0 and q.v0 == 0 and q.u1 == 0 and q.v1 == 0;
+    const fw = @as(f32, @floatFromInt(fb_w));
+    const fh = @as(f32, @floatFromInt(fb_h));
+    const fx0 = @max(0.0, q.x);
+    const fy0 = @max(0.0, q.y);
+    const fx1 = @min(fw, q.x + q.w);
+    const fy1 = @min(fh, q.y + q.h);
+    if (fx1 <= fx0 or fy1 <= fy0) return;
+    const ix0: i32 = @intFromFloat(@floor(fx0));
+    const iy0: i32 = @intFromFloat(@floor(fy0));
+    const ix1: i32 = @intFromFloat(@ceil(fx1));
+    const iy1: i32 = @intFromFloat(@ceil(fy1));
+    const cr = q.color[0];
+    const cg = q.color[1];
+    const cb = q.color[2];
+    const ca = q.color[3];
+    const afw = @as(f32, @floatFromInt(atlas_w));
+    const afh = @as(f32, @floatFromInt(atlas_h));
+    var py = iy0;
+    while (py < iy1) : (py += 1) {
+        var pxi = ix0;
+        while (pxi < ix1) : (pxi += 1) {
+            var cov: u32 = 255;
+            if (!solid) {
+                const u = (@as(f32, @floatFromInt(pxi)) + 0.5 - q.x) / q.w * (q.u1 - q.u0) + q.u0;
+                const v = (@as(f32, @floatFromInt(py)) + 0.5 - q.y) / q.h * (q.v1 - q.v0) + q.v0;
+                const tu: f32 = std.math.clamp(u, 0.0, @as(f32, @floatFromInt(atlas_w - 1)) / afw);
+                const tv: f32 = std.math.clamp(v, 0.0, @as(f32, @floatFromInt(atlas_h - 1)) / afh);
+                const tx: u32 = @intFromFloat(@floor(tu * afw));
+                const ty: u32 = @intFromFloat(@floor(tv * afh));
+                cov = atlas[@as(usize, ty) * @as(usize, atlas_w) + tx];
+                if (cov == 0) continue;
+            }
+            const sa = @as(f32, @floatFromInt(cov)) / 255.0 * ca;
+            if (sa <= 0) continue;
+            const idx: usize = @as(usize, @intCast(py)) * @as(usize, fb_w) + @as(usize, @intCast(pxi));
+            const dst = px[idx];
+            const da = @as(f32, @floatFromInt((dst >> 24) & 0xFF)) / 255.0;
+            const dr = @as(f32, @floatFromInt((dst >> 16) & 0xFF)) / 255.0;
+            const dg = @as(f32, @floatFromInt((dst >> 8) & 0xFF)) / 255.0;
+            const db = @as(f32, @floatFromInt(dst & 0xFF)) / 255.0;
+            const oa = sa + da * (1 - sa);
+            const orr = if (oa > 0) (cr * sa + dr * da * (1 - sa)) / oa else 0;
+            const ogr = if (oa > 0) (cg * sa + dg * da * (1 - sa)) / oa else 0;
+            const obl = if (oa > 0) (cb * sa + db * da * (1 - sa)) / oa else 0;
+            px[idx] = (@as(u32, @intFromFloat(@round(oa * 255))) << 24) |
+                (@as(u32, @intFromFloat(@round(orr * 255))) << 16) |
+                (@as(u32, @intFromFloat(@round(ogr * 255))) << 8) |
+                @as(u32, @intFromFloat(@round(obl * 255)));
+        }
+    }
+}
+
 /// Decode a text/uri-list payload into newline-separated local paths
 /// (file:// prefix stripped, percent-escapes decoded).
 pub fn uriListToPaths(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
@@ -324,50 +383,51 @@ pub const Runtime = struct {
 
         // GPU + font + UI (all optional; software fallback presents clear color).
         const force_sw = std.c.getenv("CIPHER_FORCE_SOFTWARE") != null;
-        if (!force_sw) if (device.load()) |v| {
-            self.vk = v;
-            if (device.createDevice(&self.vk, &self.dev)) {
-                self.vk_loaded = true;
-                if (readFileAlloc(opts.font_path, std.heap.page_allocator)) |font_data| {
-                    self.font_data = font_data;
-                    if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, opts.ui_px)) |a| {
-                        self.atlas = a;
-                        // Bake printable ASCII + Latin-1 before uploading:
-                        // uploadAtlas happens once, glyph rasterization is lazy.
-                        self.atlas.?.bake(32, 126) catch {};
-                        self.atlas.?.bake(160, 255) catch {};
-                        if (std.c.getenv("CIPHER_DUMP_ATLAS")) |p| {
-                            const fd = std.posix.openat(std.posix.AT.FDCWD, std.mem.span(p), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch null;
-                            if (fd) |f| {
-                                defer _ = std.c.close(f);
-                                var hdr_buf: [64]u8 = undefined;
-                                const hdr = std.fmt.bufPrint(&hdr_buf, "P6\n{d} {d}\n255\n", .{ self.atlas.?.atlas_w, self.atlas.?.atlas_h }) catch unreachable;
-                                _ = std.os.linux.write(f, hdr.ptr, hdr.len);
-                                var buf3 = try std.heap.page_allocator.alloc(u8, self.atlas.?.atlas.len * 3);
-                                defer std.heap.page_allocator.free(buf3);
-                                for (self.atlas.?.atlas, 0..) |px, i| {
-                                    buf3[i * 3] = px;
-                                    buf3[i * 3 + 1] = px;
-                                    buf3[i * 3 + 2] = px;
-                                }
-                                _ = std.os.linux.write(f, buf3.ptr, buf3.len);
-                            }
-                        }
-                        if (text_gpu.GpuText.init(&self.vk, &self.dev, self.width, self.height, a.atlas_w, a.atlas_h)) |g| {
+        // Load font + atlas unconditionally; software rendering works without Vulkan.
+        if (readFileAlloc(opts.font_path, std.heap.page_allocator)) |font_data| {
+            self.font_data = font_data;
+            if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, opts.ui_px)) |a| {
+                self.atlas = a;
+                self.atlas.?.bake(32, 126) catch {};
+                self.atlas.?.bake(160, 255) catch {};
+                // UI state is created now regardless of GPU path so the
+                // software-shm fallback can render the UI on CPU.
+                self.ui_state = ui_mod.Ui.init(std.heap.page_allocator, &self.atlas.?);
+                // Optional GPU path
+                if (!force_sw) if (device.load()) |v| {
+                    self.vk = v;
+                    if (device.createDevice(&self.vk, &self.dev)) {
+                        self.vk_loaded = true;
+                        if (text_gpu.GpuText.init(&self.vk, &self.dev, self.width, self.height, self.atlas.?.atlas_w, self.atlas.?.atlas_h)) |g| {
                             self.gt = g;
-                            self.gt.?.uploadAtlas(&self.vk, &self.dev, a.atlas) catch {
-                                self.gt = null;
+                            self.gt.?.uploadAtlas(&self.vk, &self.dev, self.atlas.?.atlas) catch {
                                 std.debug.print("cipher: gpu block failed at uploadAtlas\n", .{});
+                                self.gt = null;
                             };
                         } else |e| std.debug.print("cipher: gpu block failed at GpuText.init: {s}\n", .{@errorName(e)});
-                        if (self.gt != null) {
-                            self.ui_state = ui_mod.Ui.init(std.heap.page_allocator, &self.atlas.?);
+                    } else |e| std.debug.print("cipher: gpu block failed at createDevice: {s}\n", .{@errorName(e)});
+                } else |e| std.debug.print("cipher: gpu block failed at load: {s}\n", .{@errorName(e)});
+                // CIPHER_DUMP_ATLAS debug output
+                if (std.c.getenv("CIPHER_DUMP_ATLAS")) |p| {
+                    const fd = std.posix.openat(std.posix.AT.FDCWD, std.mem.span(p), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch null;
+                    if (fd) |f| {
+                        defer _ = std.c.close(f);
+                        var hdr_buf: [64]u8 = undefined;
+                        const hdr = std.fmt.bufPrint(&hdr_buf, "P6\n{d} {d}\n255\n", .{ self.atlas.?.atlas_w, self.atlas.?.atlas_h }) catch unreachable;
+                        _ = std.os.linux.write(f, hdr.ptr, hdr.len);
+                        var buf3 = try std.heap.page_allocator.alloc(u8, self.atlas.?.atlas.len * 3);
+                        defer std.heap.page_allocator.free(buf3);
+                        for (self.atlas.?.atlas, 0..) |px, i| {
+                            buf3[i * 3] = px;
+                            buf3[i * 3 + 1] = px;
+                            buf3[i * 3 + 2] = px;
                         }
-                    } else |_| {}
-                } else |e| std.debug.print("cipher: gpu block failed at TextAtlas.init: {s}\n", .{@errorName(e)});
-            } else |e| std.debug.print("cipher: gpu block failed at createDevice: {s}\n", .{@errorName(e)});
-        } else |e| std.debug.print("cipher: gpu block failed at load: {s}\n", .{@errorName(e)});
-        std.debug.print("cipher: render path = {s}\n", .{if (self.ui_state != null) "vulkan-gpu-ui" else "software-shm"});
+                        _ = std.os.linux.write(f, buf3.ptr, buf3.len);
+                    }
+                }
+            } else |_| {}
+        } else |_| {}
+        std.debug.print("cipher: render path = {s}\n", .{if (self.gt != null) "vulkan-gpu-ui" else "software-shm"});
 
         self.conn.setNonBlocking();
         return self;
@@ -473,15 +533,20 @@ pub const Runtime = struct {
             g.deinitSoft(&self.vk, &self.dev);
             self.gt = null;
         }
-        if (self.atlas) |*a| {
-            if (text_gpu.GpuText.init(&self.vk, &self.dev, w, h, a.atlas_w, a.atlas_h)) |g| {
-                self.gt = g;
-                try self.gt.?.uploadAtlas(&self.vk, &self.dev, a.atlas);
-            } else |_| {}
+        // Only re-create the GPU text pipeline when a Vulkan device exists;
+        // in software mode self.vk/self.dev are never initialized.
+        if (self.vk_loaded) {
+            if (self.atlas) |*a| {
+                if (text_gpu.GpuText.init(&self.vk, &self.dev, w, h, a.atlas_w, a.atlas_h)) |g| {
+                    self.gt = g;
+                    self.gt.?.uploadAtlas(&self.vk, &self.dev, a.atlas) catch {};
+                } else |_| {}
+            }
         }
     }
 
-    /// The immediate-mode UI for this frame (null in software-only mode).
+    /// The immediate-mode UI for this frame (created when font+atlas load;
+    /// works in both GPU and software-shm modes).
     pub fn ui(self: *Runtime) ?*ui_mod.Ui {
         return if (self.ui_state) |*u| u else null;
     }
@@ -784,9 +849,10 @@ pub const Runtime = struct {
     }
 
     fn present(self: *Runtime, app: *const App) !void {
-        if (self.ui_state != null and self.gt != null) {
+        if (self.ui_state != null) {
             var u = &self.ui_state.?;
-            u.begin(@floatFromInt(self.width), @floatFromInt(self.height), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed) catch {
+            u.begin(@floatFromInt(self.width), @floatFromInt(self.height), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed) catch |e| {
+                if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: ui.begin error: {s}\n", .{@errorName(e)});
                 self.ui_state = null;
             };
             if (self.ui_state != null) {
@@ -795,16 +861,18 @@ pub const Runtime = struct {
                     if (a.dirty) {
                         if (self.gt) |*g| {
                             g.uploadAtlas(&self.vk, &self.dev, a.atlas) catch {};
-                            a.dirty = false;
                         }
+                        a.dirty = false;
                     }
                 }
                 u.events = self.pending_events.items;
-                app.onFrame(app.ptr, self) catch {
+                app.onFrame(app.ptr, self) catch |e| {
+                    if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: onFrame error: {s}\n", .{@errorName(e)});
                     self.ui_state = null;
                 };
                 if (self.ui_state != null) {
-                    u.end() catch {
+                    u.end() catch |e| {
+                        if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: ui.end error: {s}\n", .{@errorName(e)});
                         self.ui_state = null;
                     };
                 }
@@ -820,10 +888,22 @@ pub const Runtime = struct {
                         n = eq_len;
                     }
                     self.extra_quads = null; // one frame only
-                    n = try buildQuads(&self.atlas.?, u.drawCmds(), self.quads_buf, eq_len);
-                    try self.gt.?.render(&self.vk, &self.dev, self.quads_buf[0..n]);
-                    const src = self.gt.?.pixels();
-                    @memcpy(self.shm_buf.pixels[0..src.len], src);
+                    n = buildQuads(&self.atlas.?, u.drawCmds(), self.quads_buf, eq_len) catch |e| blk: {
+                        if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: buildQuads error: {s}\n", .{@errorName(e)});
+                        break :blk eq_len;
+                    };
+                    if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: quads n={d} extra={d} cmds={d} gt={}\n", .{ n, eq_len, u.drawCmds().len, self.gt != null });
+                    if (self.gt) |*g| {
+                        try g.render(&self.vk, &self.dev, self.quads_buf[0..n]);
+                        const src = g.pixels();
+                        @memcpy(self.shm_buf.pixels[0..src.len], src);
+                    } else {
+                        // Software-shm: clear to void, rasterize the same
+                        // quad list on the CPU (solid rects + atlas glyphs).
+                        const px: []u32 = @ptrCast(@alignCast(self.shm_buf.pixels));
+                        for (px[0 .. self.width * self.height]) |*p| p.* = 0xFF04060B;
+                        for (self.quads_buf[0..n]) |q| rasterQuad(px, self.width, self.height, q, self.atlas.?.atlas, self.atlas.?.atlas_w, self.atlas.?.atlas_h);
+                    }
                 }
             }
             self.mouse_pressed = false;
