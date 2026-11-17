@@ -4,6 +4,8 @@
 const std = @import("std");
 const types = @import("core/types.zig");
 const wayland = @import("os/linux/wayland/client.zig");
+const device = @import("gpu/vulkan/device.zig");
+const frame = @import("gpu/vulkan/frame.zig");
 
 pub const Error = types.Error;
 
@@ -137,12 +139,13 @@ pub const Application = struct {
         cursor.writeU32(ids.surface.?);
         try conn.send(ids.wm_base.?, 2, cursor.slice());
 
-        // Create toplevel
+        // Create toplevel: xdg_surface.get_toplevel (opcode 1 on xdg_surface,
+        // NOT on wm_base — wm_base opcode 1 is create_positioner).
         ids.toplevel = ids.new();
         cursor = wayland.Cursor{};
         cursor.writeU32(ids.toplevel.?);
         cursor.writeU32(ids.xdg_surface.?);
-        try conn.send(ids.wm_base.?, 1, cursor.slice());
+        try conn.send(ids.xdg_surface.?, 1, cursor.slice());
 
         // Set title and app id
         var title_cursor = wayland.Cursor{};
@@ -177,6 +180,20 @@ pub const Application = struct {
         var shm_buf = try wayland.ShmBuffer.allocate(width, height);
         defer shm_buf.deinit();
 
+        // GPU path (optional): render frames on the Vulkan device when an ICD
+        // is available; otherwise fall back to the software rasterizer below.
+        // Frame bytes come back as BGRA == wl_shm ARGB8888 little-endian.
+        var vk: device.Vulkan = undefined;
+        var dev: device.Device = .{};
+        var pipe: ?frame.FramePipeline = null;
+        if (device.load()) |v| {
+            vk = v;
+            if (device.createDevice(&vk, &dev)) |_| {
+                pipe = frame.FramePipeline.init(&vk, &dev, width, height) catch null;
+            } else |_| {}
+        } else |_| {}
+        std.debug.print("sifr: render path = {s}\n", .{if (pipe != null) "vulkan-gpu" else "software-shm"});
+
         // Create shm pool and buffer
         ids.shm_pool = ids.new();
         cursor = wayland.Cursor{};
@@ -194,15 +211,16 @@ pub const Application = struct {
         cursor.writeU32(0); // ARGB8888
         try conn.send(ids.shm_pool.?, 0, cursor.slice());
 
-        // Get keyboard and pointer
+        // Get keyboard and pointer (requests go to the BOUND seat object,
+        // not the registry global name).
         ids.keyboard = ids.new();
         cursor = wayland.Cursor{};
         cursor.writeU32(ids.keyboard.?);
-        try conn.send(seat, 1, cursor.slice()); // get_keyboard
+        try conn.send(ids.seat.?, 1, cursor.slice()); // get_keyboard
         ids.pointer = ids.new();
         cursor = wayland.Cursor{};
         cursor.writeU32(ids.pointer.?);
-        try conn.send(seat, 0, cursor.slice()); // get_pointer
+        try conn.send(ids.seat.?, 0, cursor.slice()); // get_pointer
 
         // Frame loop
         var frame_index: u32 = 0;
@@ -210,32 +228,41 @@ pub const Application = struct {
         const frame_count: u32 = 24;
 
         while (frame_index < frame_count and !quit_requested) : (frame_index += 1) {
-            // Clear to void color
-            var pixels: [640 * 400]u32 = undefined;
-            for (&pixels) |*p| p.* = 0xFF04060B;
-
-            // Draw a simple brass center dot
             const cy = @as(usize, @intCast(height)) / 2;
             const cx = @as(usize, @intCast(width)) / 2;
             const r: usize = 12;
-            var py = if (cy >= r) cy - r else 0;
-            const py_end = if (cy + r < height) cy + r + 1 else height;
-            while (py < py_end) : (py += 1) {
-                var px = if (cx >= r) cx - r else 0;
-                const px_end = if (cx + r < width) cx + r + 1 else width;
-                while (px < px_end) : (px += 1) {
-                    const dx = if (px >= cx) px - cx else cx - px;
-                    const dy = if (py >= cy) py - cy else cy - py;
-                    if (dx * dx + dy * dy <= r * r) {
-                        pixels[py * width + px] = 0xFFEAB444;
+
+            if (pipe) |*p| {
+                // GPU: graphics pipeline renders the frame, copy lands in the
+                // host-visible buffer, then straight into wl_shm.
+                const t = @as(u32, @intCast(frame_index));
+                p.render(&vk, &dev, @intCast(cx + @as(usize, t) * 2), @intCast(cy), @intCast(r)) catch {
+                    std.debug.print("sifr: gpu render failed, falling back to software\n", .{});
+                    pipe = null;
+                    continue;
+                };
+                @memcpy(shm_buf.pixels, p.pixels());
+            } else {
+                // Software fallback: clear to void, draw a brass center dot.
+                var pixels: [640 * 400]u32 = undefined;
+                for (&pixels) |*pp| pp.* = 0xFF04060B;
+                var py = if (cy >= r) cy - r else 0;
+                const py_end = if (cy + r < height) cy + r + 1 else height;
+                while (py < py_end) : (py += 1) {
+                    var px = if (cx >= r) cx - r else 0;
+                    const px_end = if (cx + r < width) cx + r + 1 else width;
+                    while (px < px_end) : (px += 1) {
+                        const dx = if (px >= cx) px - cx else cx - px;
+                        const dy = if (py >= cy) py - cy else cy - py;
+                        if (dx * dx + dy * dy <= r * r) {
+                            pixels[py * width + px] = 0xFFEAB444;
+                        }
                     }
                 }
-            }
-
-            // Copy to shm buffer (pixels already in ARGB8888 little-endian layout)
-            var shm_u32: []u32 = @ptrCast(@alignCast(shm_buf.pixels));
-            for (0..width * height) |i| {
-                shm_u32[i] = pixels[i];
+                var shm_u32: []u32 = @ptrCast(@alignCast(shm_buf.pixels));
+                for (0..width * height) |i| {
+                    shm_u32[i] = pixels[i];
+                }
             }
 
             // Attach, damage, commit
