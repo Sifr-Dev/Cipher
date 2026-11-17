@@ -1,4 +1,13 @@
-# Cipher (sifr-native)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/banner-dark.svg">
+    <img alt="cipher — built from zero" src=".github/banner-light.svg" width="100%">
+  </picture>
+</p>
+
+# cipher
+
+zero-dependency, vulkan-native Linux UI framework for Zig. no toolkit. no glue. every byte is ours.
 
 A from-zero, zero-dependency native Linux GPU UI framework written in Zig
 0.17.1. No toolkit, no C wrapper, no build-time codegen: a handwritten
@@ -38,9 +47,11 @@ Requires Zig 0.17.1, a Wayland compositor (`WAYLAND_DISPLAY`,
 lavapipe both verified). A font at `/usr/share/fonts/liberation/LiberationSans-Regular.ttf`
 is used for text.
 
-## Verified evidence (2026-11-17, RTX 4060 Laptop + lavapipe)
+## verified evidence (2026-11-17, RTX 4060 Laptop + lavapipe)
 
-- `zig build test` → exit 0, 19 tests across 8 files.
+- `zig build test` → exit 0 (twice consecutively); `term_shim` 27/27; `audio_shim` 8/8
+  incl. FLAC bit-exact vs `flac`/`ffmpeg` on 6 fixtures (16/24-bit, 8–96 kHz,
+  mono/stereo, -0/-3/-5/-8; mismatches=0, md5_ok=true).
 - GPU frame pipeline exact pixels: `GPU_FRAME_OK bytes=12288 corner=04060B center=EBB545`
   (NVIDIA + lavapipe, clean under `VK_LAYER_KHRONOS_validation`), PPM at `/tmp/sifr_frame.ppm`.
 - GPU text exact pixels: `GPU_TEXT_OK bytes=61440 solid=45B5EBFF hole/void=0B0604FF`,
@@ -65,3 +76,35 @@ docs/decision-records/       why things are the way they are (with evidence)
 
 See `docs/ARCHITECTURE.md` for details and `docs/decision-records/` for the
 decisions and the bug root-cause writeups.
+
+## shown running
+
+built-from-zero apps prove the framework end to end:
+
+| app | what | evidence |
+| --- | --- | --- |
+| rex + cipherterm | multiplexer server + scriptable CLI + GPU terminal (tabs, themes, status bar) | live umbriel/NVIDIA: vulkan-gpu-ui, 120 frames in 0.9 ms/frame, mouse/keys/resize/paste |
+| nocturne | offline FLAC music player (from-zero decoder, synced LRC/VORBIS lyrics, crossfade) | live umbriel/NVIDIA: exit 0, track auto-advance at track end; offline WAV render exactly 5.000000 s |
+| cipher-hello | framework smoke app (every widget) | `WAYLAND_PROTOCOL_OK frames=24/120`, exit 0 |
+
+Both apps live in the separate **sifr-apps** project, which consumes this
+framework as a path dependency — exactly how an app is built on Qt.
+
+## speed & footprint vs toolkits (2026-11-17)
+
+minimal hello window, 120 frames, umbriel/NVIDIA — see `sifr-apps/bench/BENCH.md`:
+
+| | cipher | gtk4 | qt6 |
+| --- | --- | --- | --- |
+| linked .so mapppings | **4** | 113 | 45 |
+| wall ms (process exec) | 2344–2386 | 2239–2277 | 1961–1962 |
+| peak RSS | 286 MB | 300–326 MB | 47–48 MB |
+
+Cipher is the only one of the three with zero toolkit dependencies; Vulkan
+dlopen means the GPU ABI is never a link-time constraint. RSS is dominated by
+the NVIDIA Vulkan allocator floor, not by this framework (~20 MB above it).
+ReleaseFast Vulkan path is currently unstable on NVIDIA (tracked); debug is
+the verified path.
+
+## license
+`MIT` — see `LICENSE`. built from zero.
