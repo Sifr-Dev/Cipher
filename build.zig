@@ -37,6 +37,8 @@ pub fn build(b: *std.Build) void {
         .{ "src/ui/text/raster.zig", "text_raster" },
         .{ "src/ui/text/atlas.zig", "text_atlas" },
         .{ "src/ui/text/text_test.zig", "text_test" },
+        .{ "src/gpu/vulkan/text.zig", "vulkan_text" },
+        .{ "src/gpu_text_test.zig", "gpu_text_test" },
     };
     inline for (units) |unit| {
         const mod = b.createModule(.{

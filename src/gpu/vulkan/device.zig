@@ -74,6 +74,7 @@ pub const VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET: u32 = 35;
 pub const VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO: u32 = 39;
 pub const VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO: u32 = 40;
 pub const VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO: u32 = 42;
+pub const VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO: u32 = 31;
 pub const VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER: u32 = 45;
 pub const VK_API_VERSION_1_0: u32 = (0 << 29) | (1 << 22) | (0 << 12);
 
@@ -94,6 +95,11 @@ pub const VK_FENCE_CREATE_SIGNALED_BIT: u32 = 0x00000001;
 // Image usage (vulkan_core.h)
 pub const VK_IMAGE_USAGE_TRANSFER_SRC_BIT: u32 = 0x00000001;
 pub const VK_IMAGE_USAGE_TRANSFER_DST_BIT: u32 = 0x00000002;
+
+// Buffer usage (vulkan_core.h)
+pub const VK_BUFFER_USAGE_TRANSFER_SRC_BIT: u32 = 0x00000001;
+pub const VK_BUFFER_USAGE_TRANSFER_DST_BIT: u32 = 0x00000002;
+pub const VK_BUFFER_USAGE_VERTEX_BUFFER_BIT: u32 = 0x00000080;
 pub const VK_IMAGE_USAGE_SAMPLED_BIT: u32 = 0x00000004;
 pub const VK_IMAGE_USAGE_STORAGE_BIT: u32 = 0x00000008;
 
@@ -464,6 +470,16 @@ pub const VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO: u32 = 26;
 
 pub const VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT: u32 = 0x00000010;
 pub const VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: u32 = 2;
+pub const VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: u32 = 5;
+pub const VK_ACCESS_SHADER_READ_BIT: u32 = 0x00000020;
+pub const VK_FORMAT_R8_UNORM: u32 = 9;
+pub const VK_FORMAT_R32G32_SFLOAT: u32 = 103;
+pub const VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: u32 = 1;
+pub const VK_SAMPLER_FILTER_NEAREST: u32 = 0;
+pub const VK_SAMPLER_FILTER_LINEAR: u32 = 1;
+pub const VK_SAMPLER_MIPMAP_MODE_NEAREST: u32 = 0;
+pub const VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE: u32 = 2;
+pub const VK_VERTEX_INPUT_RATE_VERTEX: u32 = 0;
 pub const VK_SHADER_STAGE_VERTEX_BIT: u32 = 0x00000001;
 pub const VK_SHADER_STAGE_FRAGMENT_BIT: u32 = 0x00000010;
 pub const VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: u32 = 3;
@@ -562,14 +578,48 @@ pub const VkRenderPassBeginInfo = extern struct {
     pClearValues: ?[*]const VkClearValue,
 };
 
+pub const VkPipelineVertexInputBindingDescription = extern struct {
+    binding: u32,
+    stride: u32,
+    inputRate: u32,
+};
+
+pub const VkPipelineVertexInputAttributeDescription = extern struct {
+    location: u32,
+    binding: u32,
+    format: u32,
+    offset: u32,
+};
+
 pub const VkPipelineVertexInputStateCreateInfo = extern struct {
     sType: u32,
     pNext: ?*const anyopaque,
     flags: u32,
     vertexBindingDescriptionCount: u32,
-    pVertexBindingDescriptions: ?*const anyopaque,
+    pVertexBindingDescriptions: ?[*]const VkPipelineVertexInputBindingDescription,
     vertexAttributeDescriptionCount: u32,
-    pVertexAttributeDescriptions: ?*const anyopaque,
+    pVertexAttributeDescriptions: ?[*]const VkPipelineVertexInputAttributeDescription,
+};
+
+pub const VkSamplerCreateInfo = extern struct {
+    sType: u32,
+    pNext: ?*const anyopaque,
+    flags: u32,
+    magFilter: u32,
+    minFilter: u32,
+    mipmapMode: u32,
+    addressModeU: u32,
+    addressModeV: u32,
+    addressModeW: u32,
+    mipLodBias: f32,
+    anisotropyEnable: u32,
+    maxAnisotropy: f32,
+    compareEnable: u32,
+    compareOp: u32,
+    minLod: f32,
+    maxLod: f32,
+    borderColor: u32,
+    unnormalizedCoordinates: u32,
 };
 
 pub const VkPipelineInputAssemblyStateCreateInfo = extern struct {
@@ -782,6 +832,9 @@ pub const Vulkan = struct {
     vkCmdBeginRenderPass: *const fn (VkCommandBuffer, *const VkRenderPassBeginInfo, u32) callconv(.c) void,
     vkCmdDraw: *const fn (VkCommandBuffer, u32, u32, u32, u32) callconv(.c) void,
     vkCmdEndRenderPass: *const fn (VkCommandBuffer) callconv(.c) void,
+    vkCmdBindVertexBuffers: *const fn (VkCommandBuffer, u32, u32, ?[*]const VkBuffer, ?[*]const u64) callconv(.c) void,
+    vkCmdCopyBufferToImage: *const fn (VkCommandBuffer, VkBuffer, VkImage, u32, u32, ?[*]const VkBufferImageCopy) callconv(.c) void,
+    vkCreateSampler: *const fn (VkDevice, *const VkSamplerCreateInfo, ?*const anyopaque, *VkSampler) callconv(.c) VkResult,
 };
 
 pub fn load() !Vulkan {
@@ -859,6 +912,9 @@ pub fn load() !Vulkan {
     const cmd_begin_render_pass = std.c.dlsym(handle, "vkCmdBeginRenderPass") orelse return error.DlsymFailed;
     const cmd_draw = std.c.dlsym(handle, "vkCmdDraw") orelse return error.DlsymFailed;
     const cmd_end_render_pass = std.c.dlsym(handle, "vkCmdEndRenderPass") orelse return error.DlsymFailed;
+    const cmd_bind_vertex_buffers = std.c.dlsym(handle, "vkCmdBindVertexBuffers") orelse return error.DlsymFailed;
+    const cmd_copy_buffer_to_image = std.c.dlsym(handle, "vkCmdCopyBufferToImage") orelse return error.DlsymFailed;
+    const create_sampler = std.c.dlsym(handle, "vkCreateSampler") orelse return error.DlsymFailed;
 
     return .{
         .handle = handle,
@@ -934,6 +990,9 @@ pub fn load() !Vulkan {
         .vkCmdBeginRenderPass = @ptrCast(cmd_begin_render_pass),
         .vkCmdDraw = @ptrCast(cmd_draw),
         .vkCmdEndRenderPass = @ptrCast(cmd_end_render_pass),
+        .vkCmdBindVertexBuffers = @ptrCast(cmd_bind_vertex_buffers),
+        .vkCmdCopyBufferToImage = @ptrCast(cmd_copy_buffer_to_image),
+        .vkCreateSampler = @ptrCast(create_sampler),
     };
 }
 
