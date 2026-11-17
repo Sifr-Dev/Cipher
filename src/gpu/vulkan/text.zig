@@ -115,7 +115,8 @@ pub const GpuText = struct {
             .pQueueFamilyIndices = null,
         };
         var buf: d.VkBuffer = undefined;
-        if (vk.vkCreateBuffer(dev_handle, &binfo, null, &buf) != d.VK_SUCCESS)
+        const rcs = vk.vkCreateBuffer(dev_handle, &binfo, null, &buf);
+        if (rcs != d.VK_SUCCESS)
             return error.CreateBufferFailed;
         var reqs: d.VkMemoryRequirements = undefined;
         vk.vkGetBufferMemoryRequirements(dev_handle, buf, &reqs);
@@ -256,7 +257,11 @@ pub const GpuText = struct {
     }
 
     pub fn init(vk: *Vulkan, dev: *const Device, width: u32, height: u32, atlas_w: u32, atlas_h: u32) !GpuText {
-        var self = GpuText{ .width = width, .height = height, .atlas_w = atlas_w, .atlas_h = atlas_h };
+        var self = @import("zero.zig").zeroed(GpuText);
+        self.width = width;
+        self.height = height;
+        self.atlas_w = atlas_w;
+        self.atlas_h = atlas_h;
         const dev_handle = dev.device;
         const family = dev.queue_family_index;
         const size: u64 = @as(u64, width) * height * 4;

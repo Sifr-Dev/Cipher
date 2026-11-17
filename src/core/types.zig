@@ -4,6 +4,18 @@
 //! Zero third-party dependencies. All types are plain Zig.
 const std = @import("std");
 
+/// Zero-initialize a value of any type (bytes set to 0). Used to build
+/// partially-initialized structs (device handles, GPU resources) whose
+/// remaining fields are all assigned before use — avoids `undefined`
+/// bases, which leak stack garbage in ReleaseFast/ReleaseSmall.
+/// NOTE: pointer fields become null bit patterns; they must be written
+/// before any read. All Vulkan/Wayland handle out-params satisfy this.
+pub fn zeroed(comptime T: type) T {
+    var v: T = undefined;
+    @memset(std.mem.asBytes(&v), 0);
+    return v;
+}
+
 /// A stable, generational resource handle.
 /// Index + generation prevents stale-handle aliasing after pool reuse.
 pub const Handle = struct {

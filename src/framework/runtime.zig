@@ -202,7 +202,7 @@ pub const Runtime = struct {
         const runtime_dir: []const u8 = if (std.c.getenv("XDG_RUNTIME_DIR")) |p| std.mem.span(p) else "/run/user/1000";
         const display: []const u8 = if (std.c.getenv("WAYLAND_DISPLAY")) |p| std.mem.span(p) else "wayland-0";
 
-        var self: Runtime = undefined;
+        var self: Runtime = @import("../core/types.zig").zeroed(Runtime);
         self.opts = opts;
         self.conn = try wayland.Connection.connect(runtime_dir, display);
         self.ids = .{};
@@ -334,15 +334,16 @@ pub const Runtime = struct {
                             self.gt = g;
                             self.gt.?.uploadAtlas(&self.vk, &self.dev, a.atlas) catch {
                                 self.gt = null;
+                                std.debug.print("cipher: gpu block failed at uploadAtlas\n", .{});
                             };
-                        } else |_| {}
+                        } else |e| std.debug.print("cipher: gpu block failed at GpuText.init: {s}\n", .{@errorName(e)});
                         if (self.gt != null) {
                             self.ui_state = ui_mod.Ui.init(std.heap.page_allocator, &self.atlas.?);
                         }
                     } else |_| {}
-                } else |_| {}
-            } else |_| {}
-        } else |_| {}
+                } else |e| std.debug.print("cipher: gpu block failed at TextAtlas.init: {s}\n", .{@errorName(e)});
+            } else |e| std.debug.print("cipher: gpu block failed at createDevice: {s}\n", .{@errorName(e)});
+        } else |e| std.debug.print("cipher: gpu block failed at load: {s}\n", .{@errorName(e)});
         std.debug.print("cipher: render path = {s}\n", .{if (self.ui_state != null) "vulkan-gpu-ui" else "software-shm"});
 
         self.conn.setNonBlocking();

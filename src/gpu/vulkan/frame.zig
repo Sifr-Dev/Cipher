@@ -76,7 +76,9 @@ pub const FramePipeline = struct {
     }
 
     pub fn init(vk: *Vulkan, dev: *const Device, width: u32, height: u32) !FramePipeline {
-        var self = FramePipeline{ .width = width, .height = height };
+        var self = @import("zero.zig").zeroed(FramePipeline);
+        self.width = width;
+        self.height = height;
         const dev_handle = dev.device;
         const family = dev.queue_family_index;
         const size: u64 = @as(u64, width) * height * 4;
