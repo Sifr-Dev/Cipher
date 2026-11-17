@@ -63,6 +63,8 @@ pub const Server = struct {
         if (socket_path.len >= addr.path.len) return error.NameTooLong;
         @memcpy(addr.path[0..socket_path.len], socket_path);
         const brc = std.os.linux.bind(fd, @ptrCast(&addr), @sizeOf(std.os.linux.sockaddr.un));
+        // owner-only socket: the pane stream is a control channel, keep it 0600
+        _ = std.os.linux.fchmod(fd, 0o600);
         if (@as(i64, @bitCast(brc)) < 0) return error.BindFailed;
         const lrc = std.os.linux.listen(fd, 16);
         if (@as(i64, @bitCast(lrc)) < 0) return error.ListenFailed;

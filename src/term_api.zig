@@ -12,3 +12,6 @@ pub const runtime = @import("framework/runtime.zig");
 pub const input = @import("framework/input.zig");
 pub const gpu_text = @import("gpu/vulkan/text.zig");
 pub const atlas = @import("ui/text/atlas.zig");
+pub const ui = @import("ui/ui.zig");
+pub const widgets = @import("ui/widgets.zig");
+pub const layout = @import("ui/layout.zig");

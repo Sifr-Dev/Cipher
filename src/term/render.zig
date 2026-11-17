@@ -10,6 +10,21 @@ pub const THEME_FG: u32 = 0xFFC8C8C8;
 pub const THEME_BG: u32 = 0xFF0A0D13;
 pub const CURSOR_COLOR: u32 = 0xFF659EFF;
 
+/// A runtime-switchable terminal theme (cipherterm cycles these with `t`).
+pub const Theme = struct {
+    name: []const u8,
+    fg: u32,
+    bg: u32,
+    cursor: u32,
+    sel: u32,
+};
+
+pub const THEMES: [3]Theme = .{
+    .{ .name = "void", .fg = 0xFFC8C8C8, .bg = 0xFF0A0D13, .cursor = 0xFF659EFF, .sel = 0x66659EFF },
+    .{ .name = "paper", .fg = 0xFF1A1D24, .bg = 0xFFF4F1EA, .cursor = 0xFFB3541E, .sel = 0x66B3541E },
+    .{ .name = "ember", .fg = 0xFFE8D9C8, .bg = 0xFF1A0E08, .cursor = 0xFFFF7A29, .sel = 0x66FF7A29 },
+};
+
 /// xterm 256-palette as 0xAARRGGBB.
 pub fn paletteColor(idx: u8) u32 {
     if (idx < 16) {
@@ -119,13 +134,27 @@ pub fn renderGrid(
     cell_w: f32,
     cell_h: f32,
 ) !usize {
+    return renderGridT(atlas, g, out, n, origin_x, origin_y, cell_w, cell_h, THEMES[0]);
+}
+
+pub fn renderGridT(
+    atlas: *atlas_mod.TextAtlas,
+    g: *grid_mod.Grid,
+    out: []gpu_text.Quad,
+    n: usize,
+    origin_x: f32,
+    origin_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    theme: Theme,
+) !usize {
     var count = n;
     const lines = g.screenLines();
     for (lines, 0..) |line, row| {
         const y = origin_y + @as(f32, @floatFromInt(row)) * cell_h;
         for (line.cells, 0..) |cell, col| {
             const x = origin_x + @as(f32, @floatFromInt(col)) * cell_w;
-            count += try cellQuad(atlas, out, count, x, y, cell_w, cell_h, cell, THEME_FG, THEME_BG);
+            count += try cellQuad(atlas, out, count, x, y, cell_w, cell_h, cell, theme.fg, theme.bg);
         }
     }
     // cursor block (hidden while the view is scrolled into scrollback)
@@ -142,7 +171,7 @@ pub fn renderGrid(
                 .v0 = 0,
                 .u1 = 0,
                 .v1 = 0,
-                .color = runtime.rgba01(CURSOR_COLOR),
+                .color = runtime.rgba01(theme.cursor),
             };
             count += 1;
         }

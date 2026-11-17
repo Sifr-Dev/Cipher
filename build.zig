@@ -48,46 +48,9 @@ pub fn build(b: *std.Build) void {
     const run_hello_step = b.step("run-hello", "Run the cipher hello app (Esc quits)");
     run_hello_step.dependOn(&run_hello.step);
 
-    // rex-clone: term API module + scriptable CLI + server.
-    const term_mod = b.createModule(.{
-        .root_source_file = b.path("src/term_api.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    term_mod.link_libc = true;
-
-    const rex_mod = b.createModule(.{
-        .root_source_file = b.path("apps/rex.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    rex_mod.link_libc = true;
-    rex_mod.addImport("term", term_mod);
-    const rex = b.addExecutable(.{
-        .name = "rex",
-        .root_module = rex_mod,
-    });
-    b.installArtifact(rex);
-    const run_rex = b.addRunArtifact(rex);
-    const run_rex_step = b.step("run-rex", "Run the rex CLI (args after --)");
-    run_rex_step.dependOn(&run_rex.step);
-
-    // rexterm: GPU terminal client (attaches to the rex server).
-    const rexterm_mod = b.createModule(.{
-        .root_source_file = b.path("apps/rexterm.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    rexterm_mod.link_libc = true;
-    rexterm_mod.addImport("term", term_mod);
-    const rexterm = b.addExecutable(.{
-        .name = "rexterm",
-        .root_module = rexterm_mod,
-    });
-    b.installArtifact(rexterm);
-    const run_rexterm = b.addRunArtifact(rexterm);
-    const run_rexterm_step = b.step("run-rexterm", "Run the rexterm GPU terminal client (args after --)");
-    run_rexterm_step.dependOn(&run_rexterm.step);
+    // NOTE: the showcase apps (rex, cipherterm, nocturne) live in the
+    // separate sifr-apps project, which consumes this framework by path —
+    // this repo is the framework itself plus the hello example.
 
     const test_step = b.step("test", "Run all tests");
     const units = .{
@@ -106,6 +69,7 @@ pub fn build(b: *std.Build) void {
         .{ "src/ui_shim.zig", "ui_shim" },
         .{ "src/framework_shim.zig", "framework_shim" },
         .{ "src/term_shim.zig", "term_shim" },
+        .{ "src/audio_shim.zig", "audio_shim" },
         .{ "src/gpu/vulkan/text.zig", "vulkan_text" },
         .{ "src/gpu_text_test.zig", "gpu_text_test" },
     };
