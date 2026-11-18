@@ -149,9 +149,15 @@ fn readU16LE(b: []const u8) u16 {
     return @as(u16, b[0]) | (@as(u16, b[1]) << 8);
 }
 
+fn scratchPath(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
+    const pid = std.os.linux.getpid();
+    return std.fmt.allocPrint(alloc, "/tmp/cipher-{d}-{s}", .{ pid, name });
+}
+
 test "wav write/read roundtrip 16-bit stereo" {
     const alloc = std.testing.allocator;
-    const path = "/tmp/opencode/wav_rt_test.wav";
+    const path = try scratchPath(alloc, "wav_rt_test.wav");
+    defer alloc.free(path);
     const samples = [_]i64{ 0, 1, -1, 32767, -32768, 12345, -12345, 100 };
     try write(alloc, path, 44100, 2, 16, &samples);
     const w = try read(alloc, path);
@@ -165,7 +171,8 @@ test "wav write/read roundtrip 16-bit stereo" {
 
 test "wav write/read roundtrip 24-bit" {
     const alloc = std.testing.allocator;
-    const path = "/tmp/opencode/wav_rt24_test.wav";
+    const path = try scratchPath(alloc, "wav_rt24_test.wav");
+    defer alloc.free(path);
     const samples = [_]i64{ 0, 1, -1, 8388607, -8388608, -100000, 100000 };
     try write(alloc, path, 48000, 1, 24, &samples);
     const w = try read(alloc, path);

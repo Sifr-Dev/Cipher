@@ -142,7 +142,9 @@ test "crossfade is sample-exact vs independent f64 reference + WAV render" {
     // WAV render path: quantize and compare exactly
     var track_a = Track{ .path = "a", .sample_rate = 44100, .channels = ch, .bits_per_sample = 16, .samples = a, .comments = &.{}, .arena = undefined, .allocator = alloc };
     var track_b = Track{ .path = "b", .sample_rate = 44100, .channels = ch, .bits_per_sample = 16, .samples = b, .comments = &.{}, .arena = undefined, .allocator = alloc };
-    const path = "/tmp/opencode/crossfade_test.wav";
+    const pid2 = std.os.linux.getpid();
+    const path = try std.fmt.allocPrint(alloc, "/tmp/cipher-{d}-crossfade_test.wav", .{pid2});
+    defer alloc.free(path);
     const n = try renderCrossfadeWav(alloc, path, &track_a, &track_b, ov);
     try std.testing.expectEqual(exp_len, n);
     const w = try wav.read(alloc, path);

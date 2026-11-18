@@ -63,10 +63,39 @@ fn synth(alloc: std.mem.Allocator, frames: usize, ch: u16, bps: u16, rate: u32) 
     return out;
 }
 
+fn findOnPath(alloc: std.mem.Allocator, name: []const u8) ?[]const u8 {
+    const path_env = std.c.getenv("PATH") orelse "/usr/local/bin:/usr/bin:/bin";
+    var it = std.mem.splitScalar(u8, std.mem.span(path_env), ':');
+    var buf: [4096]u8 = undefined;
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        const joined = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, name }) catch continue;
+        const fd = std.posix.openat(std.posix.AT.FDCWD, joined, .{ .ACCMODE = .RDONLY }, 0) catch continue;
+        _ = std.c.close(fd);
+        return alloc.dupe(u8, joined) catch null;
+    }
+    return null;
+}
+
 test "flac decoder bit-exact vs flac+ffmpeg CLI fixtures (bps/rates/channels/levels)" {
     const alloc = std.testing.allocator;
-    const dir = "/tmp/opencode/flac-fixtures";
-    _ = try runCli(alloc, &.{ "/usr/bin/mkdir", "-p", dir });
+    const flac_bin = findOnPath(alloc, "flac") orelse {
+        std.debug.print("AUDIO_FLAC_SKIP flac CLI not on PATH\n", .{});
+        return;
+    };
+    const ffmpeg_bin = findOnPath(alloc, "ffmpeg") orelse {
+        std.debug.print("AUDIO_FLAC_SKIP ffmpeg CLI not on PATH\n", .{});
+        alloc.free(flac_bin);
+        return;
+    };
+    defer {
+        alloc.free(flac_bin);
+        alloc.free(ffmpeg_bin);
+    }
+    const pid3 = std.os.linux.getpid();
+    const dir = try std.fmt.allocPrint(alloc, "/tmp/cipher-{d}-flac-fixtures", .{pid3});
+    defer alloc.free(dir);
+    _ = try runCli(alloc, &.{ "/bin/mkdir", "-p", dir });
     const cases = [_]struct { rate: u32, ch: u16, bps: u16, level: []const u8, name: []const u8, frames: usize }{
         .{ .rate = 44100, .ch = 2, .bps = 16, .level = "-5", .name = "s16_44k_st", .frames = 22050 },
         .{ .rate = 48000, .ch = 2, .bps = 24, .level = "-8", .name = "s24_48k_st", .frames = 24000 },
@@ -89,11 +118,11 @@ test "flac decoder bit-exact vs flac+ffmpeg CLI fixtures (bps/rates/channels/lev
         try wav.write(alloc, wav_path, c.rate, c.ch, c.bps, samples);
 
         // encode with the reference flac encoder (with vorbis tags)
-        const rc1 = try runCli(alloc, &.{ "/usr/bin/flac", "-f", "-s", c.level, "--tag=TITLE=Fixture Song", "--tag=ARTIST=Tester", "--tag=LYRICS=[00:01.00]hello lyric", "-o", flac_path, wav_path });
+        const rc1 = try runCli(alloc, &.{ flac_bin, "-f", "-s", c.level, "--tag=TITLE=Fixture Song", "--tag=ARTIST=Tester", "--tag=LYRICS=[00:01.00]hello lyric", "-o", flac_path, wav_path });
         try std.testing.expectEqual(@as(u8, 0), rc1);
 
         // reference decode: ffmpeg -> s32le raw
-        const rc2 = try runCli(alloc, &.{ "/usr/bin/ffmpeg", "-y", "-loglevel", "error", "-i", flac_path, "-f", "s32le", "-c:a", "pcm_s32le", raw_path });
+        const rc2 = try runCli(alloc, &.{ ffmpeg_bin, "-y", "-loglevel", "error", "-i", flac_path, "-f", "s32le", "-c:a", "pcm_s32le", raw_path });
         try std.testing.expectEqual(@as(u8, 0), rc2);
         const raw = try wav.readFileAll(alloc, raw_path, 1024 * 1024 * 1024);
         defer alloc.free(raw);
