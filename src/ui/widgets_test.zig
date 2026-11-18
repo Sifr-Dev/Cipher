@@ -2,6 +2,7 @@
 //! text input editing (keys + paste), tabs, using frame-by-frame event feeds.
 const std = @import("std");
 const ui_mod = @import("ui.zig");
+const layout = @import("layout.zig");
 const widgets = @import("widgets.zig");
 const input = @import("../framework/input.zig");
 const atlas_mod = @import("text/atlas.zig");
@@ -292,3 +293,28 @@ test "focus: Shift-Tab wraps to the last focusable" {
 }
 
 
+
+test "tooltip: paints panel+text only while hovered" {
+    const s = try setup();
+    defer std.testing.allocator.free(s.data);
+    defer std.testing.allocator.destroy(s.ui);
+    defer s.ui.deinit();
+    defer std.testing.allocator.destroy(s.at);
+    defer s.at.deinit();
+    const ui = s.ui;
+    const rect = layout.Rect{ .x = 10, .y = 10, .w = 120, .h = 30 };
+    // mouse outside hover_rect: nothing painted
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
+    _ = try ui.button("hover me");
+    try widgets.tooltip(ui, rect, "the help text");
+    try ui.end();
+    const away = ui.drawCmds().len;
+    // mouse inside hover_rect: tooltip paints panel + hairline + text
+    try ui.begin(400, 300, 30, 20, false, false, 1.0);
+    _ = try ui.button("hover me");
+    try widgets.tooltip(ui, rect, "the help text");
+    try ui.end();
+    const hover = ui.drawCmds().len;
+    try std.testing.expect(hover > away);
+    std.debug.print("WIDGET_TOOLTIP_OK away={d} hover={d}\n", .{ away, hover });
+}

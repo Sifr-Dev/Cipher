@@ -30,6 +30,7 @@ pub const Hello = struct {
         const s = try std.fmt.bufPrint(&buf, "frames: {d}  clicks: {d}  slider: {d:.0}", .{ self.frames, self.clicks, self.slider_val });
         try u.label(s, cipher.ui.COLOR_TEXT_DIM);
         if (try u.button("Click me (Esc quits)")) self.clicks += 1;
+        if (u.prevRect(1)) |br| try cipher.widgets.tooltip(u, br, "Increments the counter; Esc quits");
         try cipher.widgets.slider(u, 300, 0, 100, &self.slider_val);
         _ = try cipher.widgets.checkbox(u, "enabled", &self.enabled);
         try cipher.widgets.tabs(u, &[_][]const u8{ "one", "two", "three" }, &self.tab);

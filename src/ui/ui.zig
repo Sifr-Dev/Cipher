@@ -113,6 +113,11 @@ pub const Ui = struct {
         try self.cmds.append(self.allocator(), .{ .text = .{ .x = x * s, .baseline = baseline * s, .str = str, .color = color } });
     }
 
+    /// Rect a widget occupied last frame (for hover-dependent decorations).
+    pub fn prevRect(self: *const Ui, id: u32) ?layout.Rect {
+        return self.prev_rects.get(id);
+    }
+
     pub fn allocator(self: *Ui) std.mem.Allocator {
         return self.arena.allocator();
     }

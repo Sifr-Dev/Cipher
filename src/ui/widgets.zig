@@ -283,6 +283,27 @@ pub fn tabs(ui: *ui_mod.Ui, labels: []const []const u8, sel: *i32) !void {
     sel.* = st.tabs;
 }
 
+/// Floating help panel shown while the mouse hovers `hover_rect`.
+/// Paint order: call at the end of onFrame so the panel lands on top.
+pub fn tooltip(ui: *ui_mod.Ui, hover_rect: layout.Rect, text: []const u8) !void {
+    if (text.len == 0) return;
+    if (hover_rect.w <= 0 or hover_rect.h <= 0) return;
+    if (!hover_rect.contains(ui.mouse_x, ui.mouse_y)) return;
+    const lh = lineH(ui);
+    const tw = (ui.atlas.measure(text) catch 0) / ui.scale;
+    const pad_x: f32 = 10;
+    const w = tw + 2 * pad_x;
+    const h = lh + 12;
+    var x = hover_rect.x;
+    const max_x = @as(f32, ui.frame_w) - w - 4;
+    if (x > max_x) x = max_x;
+    var y = hover_rect.y + hover_rect.h + 4;
+    if (y + h > @as(f32, ui.frame_h) - 2) y = hover_rect.y - h - 4; // flip above if no room below
+    try ui.addRect(.{ .x = x, .y = y, .w = w, .h = h }, C.COLOR_BUTTON_HOT);
+    try ui.addRect(.{ .x = x, .y = y, .w = w, .h = 1 }, C.COLOR_FOCUS_RING); // hairline top
+    try ui.addText(x + pad_x, y + h - 6, text, C.COLOR_TEXT);
+}
+
 /// Progress bar, frac in [0,1].
 pub fn progress(ui: *ui_mod.Ui, w: f32, frac: f32) !void {
     const id = ui.next_id;
