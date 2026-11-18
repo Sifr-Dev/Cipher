@@ -205,6 +205,20 @@ test "resolveColor: default, palette, bold-brighten, direct, reverse handled by 
     std.debug.print("RESOLVE_OK\n", .{});
 }
 
+fn findFont(comptime candidates: []const []const u8) ?[]const u8 {
+    for (candidates) |p| {
+        const fd = std.posix.openat(std.posix.AT.FDCWD, p, .{ .ACCMODE = .RDONLY }, 0) catch continue;
+        _ = std.c.close(fd);
+        return p;
+    }
+    return null;
+}
+const RENDER_FONT_CANDIDATES = [_][]const u8{
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+};
+
 fn readFile(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
     const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0);
     defer _ = std.c.close(fd);
@@ -220,7 +234,8 @@ fn readFile(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
 
 test "renderGrid: SGR-colored grid produces bg+fg quads, cursor bar present" {
     const alloc = std.testing.allocator;
-    const data = try readFile("/usr/share/fonts/liberation/LiberationSans-Regular.ttf", alloc);
+    const fpath = findFont(&RENDER_FONT_CANDIDATES) orelse return error.LiberationSansNotFound;
+    const data = try readFile(fpath, alloc);
     defer alloc.free(data);
     var atlas = try atlas_mod.TextAtlas.init(alloc, data, 16);
     defer atlas.deinit();

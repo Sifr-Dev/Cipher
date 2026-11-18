@@ -263,7 +263,11 @@ test "glyphSafe: unmapped/astral codepoints never error, layout survives" {
 
 test "font fallback: math glyph missing from primary rasterizes from fallback" {
     const alloc = std.testing.allocator;
-    const prim = try readFile("/usr/share/fonts/liberation/LiberationSans-Regular.ttf", alloc);
+    const prim_path = fontPath() orelse {
+        std.debug.print("TEXT_FALLBACK_SKIP no LiberationSans on disk\n", .{});
+        return;
+    };
+    const prim = try readFile(prim_path, alloc);
     defer alloc.free(prim);
     const math_path = mathFontPath() orelse {
         std.debug.print("TEXT_FALLBACK_SKIP no math fallback font on disk\n", .{});

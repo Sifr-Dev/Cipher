@@ -194,5 +194,9 @@ test "parser benchmark: 5 MB of mixed output" {
     const t1 = pty_mod.nowNs();
     const mbps = @as(f64, @floatFromInt(data.items.len)) / (@as(f64, @floatFromInt(t1 - t0)) / 1e9) / 1e6;
     std.debug.print("VT_BENCH_OK bytes={d} ms={d} MBps={d:.1}\n", .{ data.items.len, @divTrunc(t1 - t0, 1_000_000), mbps });
+    if (std.c.getenv("CIPHER_SKIP_PERF_GATE") != null) {
+        std.debug.print("VT_BENCH_SKIP_GATE machine-dependent assertion skipped (CIPHER_SKIP_PERF_GATE set)\n", .{});
+        return;
+    }
     try std.testing.expect(mbps > 15); // debug build; ReleaseFast measures ~54 MB/s (see worklog)
 }

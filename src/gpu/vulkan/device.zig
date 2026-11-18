@@ -842,7 +842,11 @@ pub const Vulkan = struct {
 };
 
 pub fn load() !Vulkan {
-    const handle = std.c.dlopen("/usr/lib/libvulkan.so.1", .{ .LAZY = true }) orelse return error.DlOpenFailed;
+    // SONAME first (works on Debian/Ubuntu via ldconfig cache); absolute
+    // Arch path as fallback.
+    const handle = std.c.dlopen("libvulkan.so.1", .{ .LAZY = true }) orelse
+        std.c.dlopen("/usr/lib/libvulkan.so.1", .{ .LAZY = true }) orelse
+        return error.DlOpenFailed;
 
     const create_instance = std.c.dlsym(handle, "vkCreateInstance") orelse return error.DlsymFailed;
     const enumerate_physical_devices = std.c.dlsym(handle, "vkEnumeratePhysicalDevices") orelse return error.DlsymFailed;
