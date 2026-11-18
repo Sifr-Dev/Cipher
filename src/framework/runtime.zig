@@ -29,6 +29,12 @@ pub const Options = struct {
     /// overridden at startup with CIPHER_FORCE_SCALE=<n>. A compositor that
     /// sends wl_output.scale changes the value dynamically (best effort).
     scale: u32 = 1,
+    /// Fractional density factor for HiDPI (e.g. 1.5 = render at 150% device
+    /// pixels with a 1:1 mapping; the umbriel compositor reports scale 1 for
+    /// such surfaces). Set via CIPHER_FORCE_SCALE_FRAC. The
+    /// wp_fractional_scale/wp_viewporter session-object path was removed —
+    /// umbriel kills the client connection when those objects are created.
+    fractional_scale: f32 = 1.0,
     ui_px: f32 = DEFAULT_UI_PX,
     width: u32 = DEFAULT_W,
     height: u32 = DEFAULT_H,
@@ -230,6 +236,11 @@ pub const Runtime = struct {
     height: u32,
     scale: u32 = 1, // wl_buffer scale (compositor HiDPI factor, integer)
     scale_pinned: bool = false, // CIPHER_FORCE_SCALE / Options.scale pins scale; wl_output is ignored then
+    scale_f: f32 = 1.0, // effective emission scale (integer or fractional)
+    fractional_scale: f32 = 1.0,
+    fractional_active: bool = false,
+    logical_w: u32 = 0,
+    logical_h: u32 = 0,
     shm_buf: wayland.ShmBuffer,
 
     // GPU / UI
@@ -285,13 +296,26 @@ pub const Runtime = struct {
                 }
             } else |_| {}
         }
+        var fractional: f32 = opts.fractional_scale;
+        if (std.c.getenv("CIPHER_FORCE_SCALE_FRAC")) |p| {
+            if (std.fmt.parseFloat(f32, std.mem.span(p))) |f| {
+                if (f >= 1.0 and f <= 4.0) fractional = f;
+            } else |_| {}
+        }
+        self.fractional_scale = fractional;
+        self.fractional_active = fractional != 1.0;
         self.scale = scale;
         self.scale_pinned = pinned;
-        std.debug.print("cipher: scale={d} (opts {d}x{d} -> {d}x{d} device px)\n", .{ scale, opts.width, opts.height, opts.width * scale, opts.height * scale });
+        self.scale_f = if (self.fractional_active) fractional else @as(f32, @floatFromInt(scale));
+        self.logical_w = opts.width;
+        self.logical_h = opts.height;
+        const dev_w: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(opts.width)) * self.scale_f));
+        const dev_h: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(opts.height)) * self.scale_f));
+        std.debug.print("cipher: scale={d} fractional={} (opts {d}x{d} -> {d}x{d} device px)\n", .{ self.scale_f, self.fractional_active, opts.width, opts.height, dev_w, dev_h });
         self.conn = try wayland.Connection.connect(runtime_dir, display);
         self.ids = .{};
-        self.width = opts.width * scale;
-        self.height = opts.height * scale;
+        self.width = dev_w;
+        self.height = dev_h;
         self.shm_buf = try wayland.ShmBuffer.allocate(self.width, self.height);
         self.offer_mimes = .empty;
         self.pending_events = .empty;
@@ -338,6 +362,10 @@ pub const Runtime = struct {
                     output_g = name;
                     output_v = std.mem.readInt(u32, event.payload()[pos..][0..4], .little);
                 }
+                if (std.c.getenv("CIPHER_DEBUG_GLOBALS") != null) {
+                    const ver = std.mem.readInt(u32, event.payload()[pos..][0..4], .little);
+                    std.debug.print("cipher: global {s} v{d} name={d}\n", .{ iface, ver, name });
+                }
             }
             if (ids.sync_callback != null and event.sender == ids.sync_callback.? and event.opcode == 0) break;
         }
@@ -358,8 +386,10 @@ pub const Runtime = struct {
             cursor.writeU32(oid);
             try self.conn.send(ids.registry.?, 0, cursor.slice());
         }
+        const debug_globals = std.c.getenv("CIPHER_DEBUG_GLOBALS") != null;
         inline for (.{ .{ "wl_compositor", 4, &self.g_compositor, &self.ids.compositor }, .{ "wl_shm", 1, &self.g_shm, &self.ids.shm }, .{ "xdg_wm_base", 6, &self.g_wm_base, &self.ids.wm_base }, .{ "wl_seat", 5, &self.g_seat, &self.ids.seat } }) |b| {
             const object_id = ids.new();
+            if (debug_globals) std.debug.print("cipher: bind {s} -> id {d}\n", .{ b[0], object_id });
             cursor = wayland.Cursor{};
             cursor.writeU32(b[2].*);
             cursor.str(b[0]);
@@ -410,9 +440,11 @@ pub const Runtime = struct {
 
         // Blocking wait for the first configure (socket still blocking).
         var configured = false;
+        const debug_init_events = std.c.getenv("CIPHER_DEBUG_GLOBALS") != null;
         while (!configured) {
             var event = wayland.Event{};
             try self.conn.recv(&event);
+            if (debug_init_events) std.debug.print("cipher: event sender={d} opcode={d} len={d}\n", .{ event.sender, event.opcode, event.payload().len });
             if (event.sender == self.xdg_surface and event.opcode == 0) {
                 const serial = event.read32(0);
                 cursor = wayland.Cursor{};
@@ -431,7 +463,7 @@ pub const Runtime = struct {
         // Load font + atlas unconditionally; software rendering works without Vulkan.
         if (readFileAlloc(opts.font_path, std.heap.page_allocator)) |font_data| {
             self.font_data = font_data;
-            if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, opts.ui_px * @as(f32, @floatFromInt(self.scale)))) |a| {
+            if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, opts.ui_px * self.scale_f)) |a| {
                 const boxed = try std.heap.page_allocator.create(atlas_mod.TextAtlas);
                 boxed.* = a;
                 self.atlas = boxed;
@@ -486,7 +518,15 @@ pub const Runtime = struct {
 
     /// Handle the few events that can arrive during the initial blocking wait.
     fn dispatchInitEvent(self: *Runtime, event: *wayland.Event) !void {
-        if (event.sender == wayland.WL_DISPLAY and event.opcode == 0) return error.ProtocolError;
+        if (event.sender == wayland.WL_DISPLAY and event.opcode == 0) {
+            const obj = event.read32(0);
+            const code = event.read32(1);
+            const msglen: usize = @intCast(event.read32(2));
+            const start: usize = 12;
+            const msg = if (msglen > 0 and start + msglen - 1 <= event.payload().len) event.payload()[start .. start + msglen - 1] else "?";
+            std.debug.print("cipher: WAYLAND_ERROR object={d} code={d} msg={s}\n", .{ obj, code, msg });
+            return error.ProtocolError;
+        }
         if (self.ids.output != null and event.sender == self.ids.output.? and event.opcode == 3) {
             const ns = event.readI32(0);
             if (ns >= 1) self.applyScale(@intCast(ns)) catch {};
@@ -544,7 +584,7 @@ pub const Runtime = struct {
             cursor.writeI32(@intCast(ns));
             try self.conn.send(self.surface, 8, cursor.slice()); // wl_surface.set_buffer_scale
         }
-        if (self.width != 0) try self.resize(lw * ns, lh * ns);
+        if (self.logical_w != 0) try self.resize(self.logical_w, self.logical_h);
         std.debug.print("cipher: wl_output.scale -> {d} ({d}x{d} device px)\n", .{ ns, lw * ns, lh * ns });
     }
 
@@ -594,7 +634,13 @@ pub const Runtime = struct {
     }
 
     /// Recreate shm buffer + GPU target at a new size.
-    fn resize(self: *Runtime, w: u32, h: u32) !void {
+    fn resize(self: *Runtime, logical_w: u32, logical_h: u32) !void {
+        const eff: f32 = if (self.fractional_active) self.fractional_scale else @as(f32, @floatFromInt(self.scale));
+        self.scale_f = eff;
+        const w: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(logical_w)) * eff));
+        const h: u32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(logical_h)) * eff));
+        self.logical_w = logical_w;
+        self.logical_h = logical_h;
         if (w == self.width and h == self.height) return;
         // destroy old buffer/pool objects
         if (self.buffer != 0) {
@@ -610,6 +656,15 @@ pub const Runtime = struct {
         self.height = h;
         self.shm_buf = try wayland.ShmBuffer.allocate(w, h);
         try self.makeShmObjects();
+        // negotiate buffer<->surface mapping: integer buffer_scale when
+        // scale > 1; fractional density scales render at device density
+        // without an integer mapping (wl_output.scale reports scale 1 for
+        // fractional modes, so surface pixels are delivered 1:1).
+        var cursor = wayland.Cursor{};
+        if (self.scale > 1) {
+            cursor.writeI32(@intCast(self.scale));
+            _ = self.conn.send(self.surface, 8, cursor.slice()) catch {};
+        }
         if (self.gt) |*g| {
             g.deinitSoft(&self.vk, &self.dev);
             self.gt = null;
@@ -822,10 +877,10 @@ pub const Runtime = struct {
                     const w = event.readI32(0);
                     const h = event.readI32(1);
                     if (w > 0 and h > 0) {
-                        const nw: u32 = @as(u32, @intCast(w)) * self.scale;
-                        const nh: u32 = @as(u32, @intCast(h)) * self.scale;
-                        if (nw == self.width and nh == self.height) return;
-                        self.resize(nw, nh) catch |e| {
+                        const lw: u32 = @intCast(w);
+                        const lh: u32 = @intCast(h);
+                        if (lw == self.logical_w and lh == self.logical_h) return;
+                        self.resize(lw, lh) catch |e| {
                             std.debug.print("cipher: resize failed: {s}\n", .{@errorName(e)});
                         };
                         const ev = input.Event{ .resize = .{ .w = self.width, .h = self.height } };
@@ -941,7 +996,7 @@ pub const Runtime = struct {
         if (self.ui_state != null) {
             var u = &self.ui_state.?;
             u.events = self.pending_events.items; // before begin(): begin() reads events for focus semantics
-                        u.begin(@floatFromInt(self.width / self.scale), @floatFromInt(self.height / self.scale), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed, @floatFromInt(self.scale)) catch |e| {
+                        u.begin(@floatFromInt(self.logical_w), @floatFromInt(self.logical_h), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed, self.scale_f) catch |e| {
                 if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: ui.begin error: {s}\n", .{@errorName(e)});
                 self.ui_state = null;
             };
@@ -1017,8 +1072,8 @@ pub const Runtime = struct {
         cursor = wayland.Cursor{};
         cursor.writeI32(0);
         cursor.writeI32(0);
-        cursor.writeI32(@intCast(self.width / self.scale));
-        cursor.writeI32(@intCast(self.height / self.scale));
+        cursor.writeI32(@intCast(self.logical_w));
+        cursor.writeI32(@intCast(self.logical_h));
         try self.conn.send(self.surface, 2, cursor.slice());
         try self.conn.send(self.surface, 6, &.{});
 
