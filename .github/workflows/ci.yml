@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fonts used by the text-engine tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-liberation fonts-dejavu-core
+
+      - name: Install Zig 0.17.1 (official tarball, sha256 verified)
+        run: |
+          curl -fsSL https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz -o /tmp/zig.tar.xz
+          echo "3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a  /tmp/zig.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/zig.tar.xz -C /tmp
+          echo "/tmp/zig-x86_64-linux-0.17.1" >> "$GITHUB_PATH"
+
+      - name: zig build test
+        run: zig build test
+
+      - name: Debug build
+        run: zig build
+
+      - name: ReleaseSafe build
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: ReleaseFast build
+        run: zig build -Doptimize=ReleaseFast
