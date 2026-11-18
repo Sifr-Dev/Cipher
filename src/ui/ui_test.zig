@@ -6,7 +6,22 @@ const layout = @import("layout.zig");
 const ui_mod = @import("ui.zig");
 const atlas_mod = @import("text/atlas.zig");
 
-const FONT_PATH = "/usr/share/fonts/liberation/LiberationSans-Regular.ttf";
+fn findFont(comptime candidates: []const []const u8) ?[]const u8 {
+    for (candidates) |p| {
+        const fd = std.posix.openat(std.posix.AT.FDCWD, p, .{ .ACCMODE = .RDONLY }, 0) catch continue;
+        _ = std.c.close(fd);
+        return p;
+    }
+    return null;
+}
+const LIBERATION_CANDIDATES = [_][]const u8{
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+};
+fn fontPath() ?[]const u8 {
+    return findFont(&LIBERATION_CANDIDATES);
+}
 
 fn readFile(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
     const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0);
@@ -94,7 +109,8 @@ test "layout: row grow distributes remaining space by fraction" {
 }
 
 test "ui: panel+label+button emit draw commands; button click hit-tests across frames" {
-    const data = try readFile(FONT_PATH, std.testing.allocator);
+    const fpath = fontPath() orelse return;
+    const data = try readFile(fpath, std.testing.allocator);
     defer std.testing.allocator.free(data);
     var at = try atlas_mod.TextAtlas.init(std.testing.allocator, data, 20);
     defer at.deinit();
