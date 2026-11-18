@@ -87,7 +87,10 @@ nanofly, nanomail, nanolight, nanodocs, nanobrowser (a Zig browser engine).
 Apps ~0.7 MB; gallery tests; `nui` CLI scaffolds/checks/snapshots apps.
 
 Their own benchmark table (their M3 Ultra; horizontal-frame medians; lower is
-better) — *attribution: justrach/nanoui README, retrieved 2026-11-18*:
+better) — *attribution: justrach/nanoui README, retrieved 2026-11-18; see
+external claim as attributed, not reproduced; see docs/INTERNALS.md for what
+their Linux path really does (GtkGLArea/OpenGL 3.0, GTK-clock frame pacing,
+no direct Wayland/Vulkan)*:
 
 | scene | frame CPU nanoui | frame CPU mygo | GPU nanoui | GPU mygo |
 |---|---:|---:|---:|---:|
@@ -327,7 +330,14 @@ Rules that make it a framework, not a demo:
   <100 ms, (d) a snapshot-verifiable app gallery, the framework is an
   excellent regional player, not a “new standard” — and we say exactly that.
 
-## 10. Sources
+## 10. Source verification
+
+Every architectural claim in §2–§3 that depends on upstream internals is now
+verified against shallow clones, in **docs/INTERNALS.md** (file-level
+citations, licenses observed, corrections logged in its §9). Read that file
+before repeating any "nanoui/mygo/gpui does X" statement.
+
+## 11. Sources
 
 Local: `sifr-native` tree (src/gpu/vulkan/*, src/os/linux/wayland/*,
 src/term/*, docs/ decision records), 2026-11-18 live runs (release binaries
