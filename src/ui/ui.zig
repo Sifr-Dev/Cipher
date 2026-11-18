@@ -68,7 +68,7 @@ pub const Ui = struct {
     pub const WidgetState = union(enum) {
         slider: f32,
         checkbox: bool,
-        list: struct { scroll: f32 = 0, sel: i32 = -1 },
+        list: struct { scroll: f32 = 0, sel: i32 = -1, drag: bool = false, grab: f32 = 0 },
         text: struct { buf: [4096]u8 = undefined, len: usize = 0, cursor: usize = 0 },
         tabs: i32,
         menu: MenuState,

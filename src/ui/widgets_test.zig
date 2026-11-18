@@ -446,3 +446,69 @@ test "contextMenu: click on a row activates it and closes the menu" {
     try ui.end();
     std.debug.print("WIDGET_MENU_CLICK_OK clicked row activated\n", .{});
 }
+
+test "listView: scrollbar renders with thumb; drag moves scroll" {
+    const s = try setup();
+    defer std.testing.allocator.free(s.data);
+    defer std.testing.allocator.destroy(s.ui);
+    defer s.ui.deinit();
+    defer std.testing.allocator.destroy(s.at);
+    defer s.at.deinit();
+    const ui = s.ui;
+    const many = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l" };
+    var sel: i32 = -1;
+    // short list: no scrollbar (2 items in 4 rows)
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
+    try widgets.listView(ui, 200, 4, many[0..2], &sel);
+    try ui.end();
+    const r_small = ui.widgetRect(1).?;
+    const small_cmds = ui.drawCmds().len;
+    // long list: track + thumb rects present
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
+    try widgets.listView(ui, 200, 4, &many, &sel);
+    try ui.end();
+    const r = ui.widgetRect(1).?;
+    const long_cmds = ui.drawCmds().len;
+    try std.testing.expect(long_cmds > small_cmds);
+    // find track rect (width 3, x == r.x + r.w - 5)
+    var found_track = false;
+    var found_thumb = false;
+    for (ui.drawCmds()) |c| {
+        switch (c) {
+            .rect => |rc| {
+                if (rc.rect.w == 3 and rc.rect.x == r.x + r.w - 5) found_track = true;
+                if (rc.rect.w == 3 and rc.rect.x == r.x + r.w - 5 and rc.rect.h >= 16) found_thumb = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(found_track);
+    try std.testing.expect(found_thumb);
+    // drag the thumb down (mouse pressed at thumb position, then moved down)
+    const tx = r.x + r.w - 5 + 1;
+    try ui.begin(400, 300, tx, r.y + 3, true, true, 1.0);
+    try widgets.listView(ui, 200, 4, &many, &sel);
+    try ui.end();
+    try ui.begin(400, 300, tx, r.y + 60, true, false, 1.0);
+    try widgets.listView(ui, 200, 4, &many, &sel);
+    try ui.end();
+    // mouse up: no more drag
+    try ui.begin(400, 300, tx, r.y + 60, false, false, 1.0);
+    try widgets.listView(ui, 200, 4, &many, &sel);
+    try ui.end();
+    // thumb must have moved down by now: measure lowest rect of width 3
+    var max_y: f32 = 0;
+    for (ui.drawCmds()) |c| {
+        switch (c) {
+            .rect => |rc| {
+                if (rc.rect.w == 3 and rc.rect.x == r.x + r.w - 5 and rc.rect.h >= 16) {
+                    if (rc.rect.y > max_y) max_y = rc.rect.y;
+                }
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(max_y > r.y + 4);
+    try std.testing.expect(r_small.w > 0);
+    std.debug.print("WIDGET_SCROLLBAR_OK track+thumb+drag max_y={d:.1}\n", .{max_y});
+}

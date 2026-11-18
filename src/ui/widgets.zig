@@ -123,9 +123,34 @@ pub fn listView(ui: *ui_mod.Ui, w: f32, rows: u32, items: []const []const u8, se
         }
         if (ui.mouse_pressed and prev.contains(ui.mouse_x, ui.mouse_y)) ui.focus_index = kb.pos;
         const max_scroll = @max(0, @as(f32, @floatFromInt(items.len)) * lh - (prev.h - 4));
+        // scrollbar geometry (needed before click handling so thumb wins)
+        const track_w: f32 = 3;
+        const tx = prev.x + prev.w - track_w - 2;
+        const ty = prev.y + 2;
+        const th = prev.h - 4;
+        const content_h = @as(f32, @floatFromInt(items.len)) * lh;
+        const thumb_h = if (max_scroll > 0) @max(16, th * th / content_h) else th;
+        const travel = th - thumb_h;
+        const thumb_y = ty + (if (max_scroll > 0) st.list.scroll / max_scroll else 0) * travel;
+        var engaged_drag = false;
+        if (ui.mouse_pressed and max_scroll > 0) {
+            if (ui.mouse_x >= tx - 3 and ui.mouse_x <= tx + track_w + 3 and
+                ui.mouse_y >= thumb_y and ui.mouse_y <= thumb_y + thumb_h) {
+                st.list.drag = true;
+                st.list.grab = ui.mouse_y - thumb_y;
+                engaged_drag = true;
+            } else {
+                st.list.drag = false; // pressed elsewhere cancels an in-flight drag
+            }
+        }
+        if (st.list.drag and ui.mouse_down and max_scroll > 0) {
+            const ny = @max(ty, @min(ty + travel, ui.mouse_y - st.list.grab));
+            st.list.scroll = if (travel > 0) (ny - ty) / travel * max_scroll else 0;
+        }
+        if (!ui.mouse_down) st.list.drag = false;
         st.list.scroll = std.math.clamp(st.list.scroll, 0, max_scroll);
-        // click a row
-        if (ui.mouse_pressed and prev.contains(ui.mouse_x, ui.mouse_y)) {
+        // click a row (unless we engaged the scrollbar thumb)
+        if (ui.mouse_pressed and !engaged_drag and prev.contains(ui.mouse_x, ui.mouse_y)) {
             const row = @as(i32, @intFromFloat(@floor((ui.mouse_y - prev.y - 2 + st.list.scroll) / lh)));
             if (row >= 0 and row < items.len) st.list.sel = row;
         }
@@ -140,6 +165,10 @@ pub fn listView(ui: *ui_mod.Ui, w: f32, rows: u32, items: []const []const u8, se
             const is_sel = @as(i32, @intCast(i)) == st.list.sel;
             try ui.addRect(r, if (is_sel) C.COLOR_BUTTON_ACTIVE else C.COLOR_BUTTON);
             try ui.addText(r.x + 6, r.y + ascent(ui) * 0.8, items[i], if (is_sel) C.COLOR_VOID else C.COLOR_TEXT);
+        }
+        if (max_scroll > 0) {
+            try ui.addRect(.{ .x = tx, .y = ty, .w = track_w, .h = th }, C.COLOR_BUTTON);
+            try ui.addRect(.{ .x = tx, .y = thumb_y, .w = track_w, .h = thumb_h }, if (st.list.drag) C.COLOR_FOCUS_RING else C.COLOR_TEXT_DIM);
         }
     }
     sel.* = st.list.sel;
