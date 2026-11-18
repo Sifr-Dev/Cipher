@@ -25,14 +25,51 @@ def types_of(m, emitted, parent):
     for a in m.findall('arg'):
         t = a.get('type')
         iface = a.get('interface', '')
-        # Self-references would make the wl_interface value depend on its own
-        # methods table (dependency loop in Zig); the types array is not used
-        # by Cipher's marshalling path, so null them out.
-        if t in ('new_id', 'object') and iface and iface in emitted and iface != parent:
+        self_ref = iface == parent
+        # Zig value dependency: nulls for self-references (C's extern cycles
+        # cannot exist here). 'n' without interface expands to sun with NULL
+        # types; marshalling uses the fixed interface param anyway.
+        if t in ('new_id', 'object') and iface and iface in emitted and not self_ref:
             args.append('&%s_interface' % iface)
         else:
             args.append('null')
     return ', '.join(args)
+
+def message_pair(m, emitted, parent):
+    """Return (signature, [types...]) mirroring wayland-scanner exactly:
+    - leading since digit when since > 1
+    - allow-null object/string args get a '?' prefix
+    - new_id without interface expands to 'sun' with NULL types entries
+    - new_id with interface and object args get &iface in types (self-refs nulled)
+    - enum keeps the base letter"""
+    sig = ''
+    ty = []
+    since = m.get('since')
+    if since and since != '1':
+        sig += since
+    for a in m.findall('arg'):
+        t = a.get('type')
+        iface = a.get('interface', '')
+        letter = TYPE[t]
+        if t == 'new_id' and not iface:
+            sig += 'sun'
+            ty += ['null', 'null', 'null']
+            continue
+        if a.get('allow-null') == 'true':
+            sig += '?' + letter
+        else:
+            sig += letter
+        self_ref = iface == parent
+        if t in ('new_id', 'object') and iface and iface in emitted and not self_ref:
+            ty.append('&%s_interface' % iface)
+        elif t == 'new_id' and iface and iface in emitted and self_ref:
+            ty.append('null')
+        else:
+            ty.append('null')
+    return sig, ty
+
+def sig(m):
+    return ''.join(TYPE[a.get('type')] for a in m.findall('arg'))
 
 CORE_EMIT = ['wl_display', 'wl_registry', 'wl_callback', 'wl_compositor', 'wl_region',
              'wl_surface', 'wl_shm', 'wl_shm_pool', 'wl_buffer',
@@ -80,13 +117,15 @@ pub const wl_interface = extern struct {
         w('const %s = struct {\n' % name)
         w('    const methods = [_]wl_message{\n')
         for m in reqs:
+            s, ty = message_pair(m, emitted, name)
             w('        .{ .name = "%s", .signature = "%s", .types = &.{%s} },\n' %
-              (esc(m.get('name')), sig(m), types_of(m, emitted, name)))
+              (esc(m.get('name')), s, ', '.join(ty)))
         w('    };\n')
         w('    const events = [_]wl_message{\n')
         for m in evts:
+            s, ty = message_pair(m, emitted, name)
             w('        .{ .name = "%s", .signature = "%s", .types = &.{%s} },\n' %
-              (esc(m.get('name')), sig(m), types_of(m, emitted, name)))
+              (esc(m.get('name')), s, ', '.join(ty)))
         w('    };\n')
         w('};\n\n')
         w('pub const %s_interface = wl_interface{ .name = "%s", .version = %s, .method_count = %d, .methods = &%s.methods, .event_count = %d, .events = &%s.events };\n\n' %

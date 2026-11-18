@@ -40,6 +40,7 @@ fn load() !void {
         .wl_proxy_marshal_constructor = sym(*const fn (*anyopaque, u32, *const wl_interface, ...) callconv(.c) ?*wl_proxy, h, "wl_proxy_marshal_constructor"),
         .wl_proxy_marshal_flags = sym(*const fn (*anyopaque, u32, ?*const wl_interface, u32, u32, ...) callconv(.c) ?*wl_proxy, h, "wl_proxy_marshal_flags"),
         .wl_proxy_add_listener = sym(*const fn (*anyopaque, *const anyopaque, ?*anyopaque) callconv(.c) i32, h, "wl_proxy_add_listener"),
+        .wl_proxy_get_version = sym(*const fn (*anyopaque) callconv(.c) u32, h, "wl_proxy_get_version"),
     };
     loadXkb();
 }
@@ -75,6 +76,7 @@ const Wayland = struct {
     wl_proxy_marshal_constructor: *const fn (*anyopaque, u32, *const wl_interface, ...) callconv(.c) ?*wl_proxy,
     wl_proxy_marshal_flags: *const fn (*anyopaque, u32, ?*const wl_interface, u32, u32, ...) callconv(.c) ?*wl_proxy,
     wl_proxy_add_listener: *const fn (*anyopaque, *const anyopaque, ?*anyopaque) callconv(.c) i32,
+    wl_proxy_get_version: *const fn (*anyopaque) callconv(.c) u32,
 };
 
 const Xkb = struct {
@@ -163,6 +165,8 @@ const xdg_surface_listener = extern struct {
 const xdg_toplevel_listener = extern struct {
     configure: ?*const fn (?*anyopaque, *xdg_toplevel, i32, i32, *const wl_array) callconv(.c) void = null,
     close: ?*const fn (?*anyopaque, *xdg_toplevel) callconv(.c) void = null,
+    configure_bounds: ?*const fn (?*anyopaque, *xdg_toplevel, i32, i32) callconv(.c) void = null,
+    wm_capabilities: ?*const fn (?*anyopaque, *xdg_toplevel, *const wl_array) callconv(.c) void = null,
 };
 const wl_seat_listener = extern struct {
     capabilities: ?*const fn (?*anyopaque, *wl_seat, u32) callconv(.c) void = null,
@@ -188,6 +192,7 @@ const wl_pointer_listener = extern struct {
     axis_discrete: ?*const fn (?*anyopaque, *wl_pointer, u32, i32) callconv(.c) void = null,
     axis_value120: ?*const fn (?*anyopaque, *wl_pointer, u32, i32) callconv(.c) void = null,
     axis_relative_direction: ?*const fn (?*anyopaque, *wl_pointer, u32, u32) callconv(.c) void = null,
+    warp: ?*const fn (?*anyopaque, *wl_pointer, u32, wl_fixed_t, wl_fixed_t) callconv(.c) void = null,
 };
 const wl_output_listener = extern struct {
     geometry: ?*const fn (?*anyopaque, *wl_output, i32, i32, i32, i32, i32, [*:0]const u8, [*:0]const u8, i32) callconv(.c) void = null,
@@ -217,6 +222,9 @@ const wl_data_source_listener = extern struct {
     dnd_drop_performed: ?*const fn (?*anyopaque, *wl_data_source) callconv(.c) void = null,
     dnd_finished: ?*const fn (?*anyopaque, *wl_data_source) callconv(.c) void = null,
     action: ?*const fn (?*anyopaque, *wl_data_source, u32) callconv(.c) void = null,
+};
+const wl_callback_listener = extern struct {
+    done: ?*const fn (?*anyopaque, *anyopaque, u32) callconv(.c) void = null,
 };
 const wl_array = extern struct {
     size: usize,
@@ -378,13 +386,15 @@ pub const Connection = struct {
         version: u32,
     };
 
-    pub fn connect(allocator: std.mem.Allocator) !Connection {
+    pub fn connect(allocator: std.mem.Allocator) !*Connection {
         if (libwayland == null) try load();
 
         const display = w.wl_display_connect(null) orelse return Error.ConnectFailed;
         errdefer w.wl_display_disconnect(display);
 
-        var self = Connection{
+        const self = allocator.create(Connection) catch return Error.OutOfMemory;
+        errdefer allocator.destroy(self);
+        self.* = Connection{
             .display = display,
             .fd = w.wl_display_get_fd(display),
             .registry = undefined,
@@ -395,16 +405,23 @@ pub const Connection = struct {
             .alloc = allocator,
         };
 
-        const reg_proxy = w.wl_proxy_marshal_constructor(@ptrCast(display), 1, &wayland_tables.wl_registry_interface, @as(?*const anyopaque, null)) orelse return Error.ConnectFailed;
+        const reg_proxy = w.wl_proxy_marshal_flags(@ptrCast(display), 1, &wayland_tables.wl_registry_interface, 1, 0, @as(?*const anyopaque, null)) orelse return Error.ConnectFailed;
         self.registry = @ptrCast(reg_proxy);
         self.registry_token = self.tokenize(reg_proxy);
 
         // NOTE: wl_display itself cannot take a listener (libwayland-client keeps
         // an internal one); protocol errors surface via wl_display_get_error().
-        if (w.wl_proxy_add_listener(reg_proxy, @ptrCast(&REGISTRY_LISTENER), @ptrCast(&self)) != 0) return Error.ConnectFailed;
+        if (w.wl_proxy_add_listener(reg_proxy, @ptrCast(&REGISTRY_LISTENER), @ptrCast(self)) != 0) return Error.ConnectFailed;
 
         if (w.wl_display_roundtrip(display) < 0) return Error.ConnectFailed;
         return self;
+    }
+
+    /// disconnect + free the heap Connection. Listeners reference this
+    /// Connection's heap address; do not move it after listeners are set.
+    pub fn destroy(self: *Connection) void {
+        self.disconnect();
+        self.alloc.destroy(self);
     }
 
     pub fn disconnect(self: *Connection) void {
@@ -444,7 +461,6 @@ pub const Connection = struct {
 
     pub fn tokenize(self: *Connection, proxy: ?*anyopaque) u32 {
         if (proxy == null) return 0;
-        if (std.c.getenv("CIPHER_DEBUG_TOK") != null) std.debug.print("debug: tokenize proxy={?*anyopaque}\n", .{proxy});
         const p: u64 = @intFromPtr(proxy);
         if (self.ptr_tokens.get(p)) |t| return t;
         next_token += 1;
@@ -457,6 +473,11 @@ pub const Connection = struct {
     pub fn proxyFromToken(self: *Connection, token: u32) ?*anyopaque {
         const p = self.token_ptrs.get(token) orelse return null;
         return @ptrFromInt(p);
+    }
+
+    pub fn versionOf(self: *Connection, token: u32) u32 {
+        const proxy = self.proxyFromToken(token) orelse return 1;
+        return w.wl_proxy_get_version(proxy);
     }
 
     pub fn findGlobal(self: *Connection, name: []const u8) ?Global {
@@ -478,6 +499,7 @@ pub const Connection = struct {
 
     /// Dispatch any events already pending; do not read from the fd.
     pub fn drainPending(self: *Connection) !usize {
+        _ = w.wl_display_flush(self.display);
         const disp = w.wl_display_dispatch_pending(self.display);
         if (disp < 0) return Error.ProtocolError;
         return @intCast(disp);
@@ -485,6 +507,7 @@ pub const Connection = struct {
 
     /// Wait up to timeout_ms for events and dispatch them.
     pub fn waitDispatch(self: *Connection, timeout_ms: i32) !usize {
+        _ = w.wl_display_flush(self.display);
         const pending = w.wl_display_dispatch_pending(self.display);
         if (pending < 0) return Error.ProtocolError;
         if (pending > 0) return @intCast(pending);
@@ -535,7 +558,7 @@ fn tokenizeFromData(data: ?*anyopaque, proxy: ?*anyopaque) u32 {
 const REGISTRY_LISTENER = wl_registry_listener{ .global = registryGlobal, .global_remove = registryGlobalRemove };
 const XDG_WM_BASE_LISTENER = xdg_wm_base_listener{ .ping = xdgWmBasePingListener };
 const XDG_SURFACE_LISTENER = xdg_surface_listener{ .configure = xdgSurfaceConfigureListener };
-const XDG_TOPLEVEL_LISTENER = xdg_toplevel_listener{ .configure = xdgToplevelConfigureListener, .close = xdgToplevelCloseListener };
+const XDG_TOPLEVEL_LISTENER = xdg_toplevel_listener{ .configure = xdgToplevelConfigureListener, .close = xdgToplevelCloseListener, .configure_bounds = xdgToplevelConfigureBoundsListener, .wm_capabilities = xdgToplevelWmCapabilitiesListener };
 const WL_SEAT_LISTENER = wl_seat_listener{ .capabilities = seatCapabilitiesListener, .name = seatNameListener };
 const WL_KEYBOARD_LISTENER = wl_keyboard_listener{
     .keymap = keyboardKeymapListener,
@@ -557,6 +580,7 @@ const WL_POINTER_LISTENER = wl_pointer_listener{
     .axis_discrete = pointerAxisDiscreteListener,
     .axis_value120 = pointerAxisValue120Listener,
     .axis_relative_direction = pointerAxisRelativeDirectionListener,
+    .warp = pointerWarpListener,
 };
 const WL_OUTPUT_LISTENER = wl_output_listener{
     .geometry = outputGeometryListener,
@@ -575,7 +599,8 @@ const WL_DATA_DEVICE_LISTENER = wl_data_device_listener{
     .drop = dataDeviceDropListener,
     .selection = dataDeviceSelectionListener,
 };
-const WL_DATA_OFFER_LISTENER = wl_data_offer_listener{ .offer = dataOfferOfferListener };
+const WL_DATA_OFFER_LISTENER = wl_data_offer_listener{ .offer = dataOfferOfferListener, .source_actions = dataOfferSourceActionsListener, .action = dataOfferActionListener };
+const WL_CALLBACK_LISTENER = wl_callback_listener{ .done = frameDoneListener };
 const WL_DATA_SOURCE_LISTENER = wl_data_source_listener{
     .target = dataSourceTargetListener,
     .send = dataSourceSendListener,
@@ -616,7 +641,7 @@ pub const CString = struct {
 
 pub fn compositorCreateSurface(conn: *Connection, compositor: u32) !u32 {
     const com: *wl_compositor = @ptrCast(conn.proxyFromToken(compositor) orelse return Error.BindFailed);
-    const s = w.wl_proxy_marshal_constructor(com, 0, &wayland_tables.wl_surface_interface) orelse return Error.OutOfMemory;
+    const s = w.wl_proxy_marshal_flags(com, 0, &wayland_tables.wl_surface_interface, conn.versionOf(compositor), 0, @as(?*const anyopaque, null)) orelse return Error.OutOfMemory;
     return conn.tokenize(s);
 }
 
@@ -626,20 +651,15 @@ pub fn wmBasePong(conn: *Connection, wm_base: u32, serial: u32) void {
 }
 
 pub fn wmBaseCreateXdgSurface(conn: *Connection, wm_base: u32, surface: u32) !u32 {
-    const base_raw = conn.proxyFromToken(wm_base);
-    const surf_raw = conn.proxyFromToken(surface);
-    std.debug.print("debug: wmBaseCreateXdgSurface wm_base={d}->{?*anyopaque} surface={d}->{?*anyopaque}\n", .{ wm_base, base_raw, surface, surf_raw });
-    const base: *xdg_wm_base = @ptrCast(base_raw orelse return Error.BindFailed);
-    const surf: *wl_surface = @ptrCast(surf_raw orelse return Error.BindFailed);
-    std.debug.print("debug: base({?*anyopaque}) calling marshal for get_xdg_surface with surf({?*anyopaque})\n", .{ conn.proxyFromToken(wm_base), surf });
-    const s = w.wl_proxy_marshal_constructor(base, 2, &wayland_tables.xdg_surface_interface, @as(?*wl_surface, surf)) orelse return Error.OutOfMemory;
-    std.debug.print("debug: marshal returned {?*anyopaque}\n", .{s});
+    const base: *xdg_wm_base = @ptrCast(conn.proxyFromToken(wm_base) orelse return Error.BindFailed);
+    const surf: *wl_surface = @ptrCast(conn.proxyFromToken(surface) orelse return Error.BindFailed);
+    const s = w.wl_proxy_marshal_flags(base, 2, &wayland_tables.xdg_surface_interface, conn.versionOf(wm_base), 0, @as(?*const anyopaque, null), surf) orelse return Error.OutOfMemory;
     return conn.tokenize(s);
 }
 
 pub fn xdgSurfaceGetToplevel(conn: *Connection, xs: u32) !u32 {
     const s: *xdg_surface = @ptrCast(conn.proxyFromToken(xs) orelse return Error.BindFailed);
-    const t = w.wl_proxy_marshal_constructor(s, 1, &wayland_tables.xdg_toplevel_interface) orelse return Error.OutOfMemory;
+    const t = w.wl_proxy_marshal_flags(s, 1, &wayland_tables.xdg_toplevel_interface, conn.versionOf(xs), 0, @as(?*const anyopaque, null)) orelse return Error.OutOfMemory;
     return conn.tokenize(t);
 }
 
@@ -686,8 +706,15 @@ pub fn surfaceAttach(conn: *Connection, surface: u32, buffer: u32, x: i32, y: i3
 
 pub fn surfaceFrame(conn: *Connection, surface: u32) !u32 {
     const s: *wl_surface = @ptrCast(conn.proxyFromToken(surface) orelse return Error.BindFailed);
-    const cb = w.wl_proxy_marshal_constructor(s, 3, &wayland_tables.wl_callback_interface) orelse return Error.OutOfMemory;
-    return conn.tokenize(cb);
+    const cb = w.wl_proxy_marshal_flags(s, 3, &wayland_tables.wl_callback_interface, conn.versionOf(surface), 0, @as(?*const anyopaque, null)) orelse return Error.OutOfMemory;
+    const token = conn.tokenize(cb);
+    reg(conn, token, @ptrCast(&WL_CALLBACK_LISTENER));
+    return token;
+}
+
+fn frameDoneListener(data: ?*anyopaque, cb: *anyopaque, serial: u32) callconv(.c) void {
+    _ = serial;
+    pushEvent(data, cb, 0, null, 0, .{});
 }
 
 pub fn xdgSurfaceAckConfigure(conn: *Connection, xs: u32, serial: u32) void {
@@ -697,38 +724,38 @@ pub fn xdgSurfaceAckConfigure(conn: *Connection, xs: u32, serial: u32) void {
 
 pub fn seatGetKeyboard(conn: *Connection, seat: u32) !u32 {
     const s: *wl_seat = @ptrCast(conn.proxyFromToken(seat) orelse return Error.BindFailed);
-    const k = w.wl_proxy_marshal_constructor(s, 1, &wayland_tables.wl_keyboard_interface) orelse return Error.OutOfMemory;
+    const k = w.wl_proxy_marshal_flags(s, 1, &wayland_tables.wl_keyboard_interface, conn.versionOf(seat), 0, @as(?*const anyopaque, null)) orelse return Error.OutOfMemory;
     return conn.tokenize(k);
 }
 
 pub fn seatGetPointer(conn: *Connection, seat: u32) !u32 {
     const s: *wl_seat = @ptrCast(conn.proxyFromToken(seat) orelse return Error.BindFailed);
-    const p = w.wl_proxy_marshal_constructor(s, 0, &wayland_tables.wl_pointer_interface) orelse return Error.OutOfMemory;
+    const p = w.wl_proxy_marshal_flags(s, 0, &wayland_tables.wl_pointer_interface, conn.versionOf(seat), 0, @as(?*const anyopaque, null)) orelse return Error.OutOfMemory;
     return conn.tokenize(p);
 }
 
 pub fn shmCreatePool(conn: *Connection, shm: u32, fd: i32, size: i32) !u32 {
     const s: *wl_shm = @ptrCast(conn.proxyFromToken(shm) orelse return Error.BindFailed);
-    const p = w.wl_proxy_marshal_constructor(s, 0, &wayland_tables.wl_shm_pool_interface, fd, size) orelse return Error.OutOfMemory;
+    const p = w.wl_proxy_marshal_flags(s, 0, &wayland_tables.wl_shm_pool_interface, conn.versionOf(shm), 0, @as(?*const anyopaque, null), fd, size) orelse return Error.OutOfMemory;
     return conn.tokenize(p);
 }
 
 pub fn shmPoolCreateBuffer(conn: *Connection, pool: u32, offset: i32, width: i32, height: i32, stride: i32, format: u32) !u32 {
     const p: *wl_shm_pool = @ptrCast(conn.proxyFromToken(pool) orelse return Error.BindFailed);
-    const b = w.wl_proxy_marshal_constructor(p, 0, &wayland_tables.wl_buffer_interface, offset, width, height, stride, format) orelse return Error.OutOfMemory;
+    const b = w.wl_proxy_marshal_flags(p, 0, &wayland_tables.wl_buffer_interface, conn.versionOf(pool), 0, @as(?*const anyopaque, null), offset, width, height, stride, format) orelse return Error.OutOfMemory;
     return conn.tokenize(b);
 }
 
 pub fn dataDeviceManagerCreateDataSource(conn: *Connection, ddm: u32) !u32 {
     const m: *wl_data_device_manager = @ptrCast(conn.proxyFromToken(ddm) orelse return Error.BindFailed);
-    const s = w.wl_proxy_marshal_constructor(m, 0, &wayland_tables.wl_data_source_interface) orelse return Error.OutOfMemory;
+    const s = w.wl_proxy_marshal_flags(m, 0, &wayland_tables.wl_data_source_interface, conn.versionOf(ddm), 0, @as(?*const anyopaque, null)) orelse return Error.OutOfMemory;
     return conn.tokenize(s);
 }
 
 pub fn dataDeviceManagerGetDataDevice(conn: *Connection, ddm: u32, seat: u32) !u32 {
     const m: *wl_data_device_manager = @ptrCast(conn.proxyFromToken(ddm) orelse return Error.BindFailed);
     const s: *wl_seat = @ptrCast(conn.proxyFromToken(seat) orelse return Error.BindFailed);
-    const d = w.wl_proxy_marshal_constructor(m, 1, &wayland_tables.wl_data_device_interface, s) orelse return Error.OutOfMemory;
+    const d = w.wl_proxy_marshal_flags(m, 1, &wayland_tables.wl_data_device_interface, conn.versionOf(ddm), 0, @as(?*const anyopaque, null), s) orelse return Error.OutOfMemory;
     return conn.tokenize(d);
 }
 
@@ -969,6 +996,22 @@ fn pointerAxisValue120Listener(data: ?*anyopaque, ptr: *wl_pointer, axis: u32, v
 }
 fn pointerAxisRelativeDirectionListener(data: ?*anyopaque, ptr: *wl_pointer, axis: u32, direction: u32) callconv(.c) void {
     pushEvent(data, ptr, 10, null, 2, .{ axis, direction });
+}
+fn pointerWarpListener(data: ?*anyopaque, ptr: *wl_pointer, time: u32, x: wl_fixed_t, y: wl_fixed_t) callconv(.c) void {
+    pushEvent(data, ptr, 11, null, 3, .{ time, @bitCast(x), @bitCast(y) });
+}
+fn xdgToplevelConfigureBoundsListener(data: ?*anyopaque, t: *xdg_toplevel, width: i32, height: i32) callconv(.c) void {
+    pushEvent(data, t, 2, null, 2, .{ @bitCast(width), @bitCast(height) });
+}
+fn xdgToplevelWmCapabilitiesListener(data: ?*anyopaque, t: *xdg_toplevel, capabilities: *const wl_array) callconv(.c) void {
+    _ = capabilities;
+    pushEvent(data, t, 3, null, 0, .{});
+}
+fn dataOfferSourceActionsListener(data: ?*anyopaque, offer: *wl_data_offer, source_actions: u32) callconv(.c) void {
+    pushEvent(data, offer, 1, null, 1, .{source_actions});
+}
+fn dataOfferActionListener(data: ?*anyopaque, offer: *wl_data_offer, action: u32) callconv(.c) void {
+    pushEvent(data, offer, 2, null, 1, .{action});
 }
 fn outputScaleListener(data: ?*anyopaque, output: *wl_output, scale: i32) callconv(.c) void {
     pushEvent(data, output, 3, null, 1, .{ @bitCast(scale) });

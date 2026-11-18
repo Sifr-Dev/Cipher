@@ -33,7 +33,7 @@ pub const wl_display_interface = wl_interface{ .name = "wl_display", .version = 
 
 const wl_registry = struct {
     const methods = [_]wl_message{
-        .{ .name = "bind", .signature = "un", .types = &.{null, null} },
+        .{ .name = "bind", .signature = "usun", .types = &.{null, null, null, null} },
     };
     const events = [_]wl_message{
         .{ .name = "global", .signature = "usu", .types = &.{null, null, null} },
@@ -57,7 +57,7 @@ const wl_compositor = struct {
     const methods = [_]wl_message{
         .{ .name = "create_surface", .signature = "n", .types = &.{&wl_surface_interface} },
         .{ .name = "create_region", .signature = "n", .types = &.{&wl_region_interface} },
-        .{ .name = "release", .signature = "", .types = &.{} },
+        .{ .name = "release", .signature = "7", .types = &.{} },
     };
     const events = [_]wl_message{
     };
@@ -80,23 +80,23 @@ pub const wl_region_interface = wl_interface{ .name = "wl_region", .version = 7,
 const wl_surface = struct {
     const methods = [_]wl_message{
         .{ .name = "destroy", .signature = "", .types = &.{} },
-        .{ .name = "attach", .signature = "oii", .types = &.{&wl_buffer_interface, null, null} },
+        .{ .name = "attach", .signature = "?oii", .types = &.{&wl_buffer_interface, null, null} },
         .{ .name = "damage", .signature = "iiii", .types = &.{null, null, null, null} },
         .{ .name = "frame", .signature = "n", .types = &.{&wl_callback_interface} },
-        .{ .name = "set_opaque_region", .signature = "o", .types = &.{&wl_region_interface} },
-        .{ .name = "set_input_region", .signature = "o", .types = &.{&wl_region_interface} },
+        .{ .name = "set_opaque_region", .signature = "?o", .types = &.{&wl_region_interface} },
+        .{ .name = "set_input_region", .signature = "?o", .types = &.{&wl_region_interface} },
         .{ .name = "commit", .signature = "", .types = &.{} },
-        .{ .name = "set_buffer_transform", .signature = "i", .types = &.{null} },
-        .{ .name = "set_buffer_scale", .signature = "i", .types = &.{null} },
-        .{ .name = "damage_buffer", .signature = "iiii", .types = &.{null, null, null, null} },
-        .{ .name = "offset", .signature = "ii", .types = &.{null, null} },
-        .{ .name = "get_release", .signature = "n", .types = &.{&wl_callback_interface} },
+        .{ .name = "set_buffer_transform", .signature = "2i", .types = &.{null} },
+        .{ .name = "set_buffer_scale", .signature = "3i", .types = &.{null} },
+        .{ .name = "damage_buffer", .signature = "4iiii", .types = &.{null, null, null, null} },
+        .{ .name = "offset", .signature = "5ii", .types = &.{null, null} },
+        .{ .name = "get_release", .signature = "7n", .types = &.{&wl_callback_interface} },
     };
     const events = [_]wl_message{
         .{ .name = "enter", .signature = "o", .types = &.{&wl_output_interface} },
         .{ .name = "leave", .signature = "o", .types = &.{&wl_output_interface} },
-        .{ .name = "preferred_buffer_scale", .signature = "i", .types = &.{null} },
-        .{ .name = "preferred_buffer_transform", .signature = "u", .types = &.{null} },
+        .{ .name = "preferred_buffer_scale", .signature = "6i", .types = &.{null} },
+        .{ .name = "preferred_buffer_transform", .signature = "6u", .types = &.{null} },
     };
 };
 
@@ -105,7 +105,7 @@ pub const wl_surface_interface = wl_interface{ .name = "wl_surface", .version = 
 const wl_shm = struct {
     const methods = [_]wl_message{
         .{ .name = "create_pool", .signature = "nhi", .types = &.{&wl_shm_pool_interface, null, null} },
-        .{ .name = "release", .signature = "", .types = &.{} },
+        .{ .name = "release", .signature = "2", .types = &.{} },
     };
     const events = [_]wl_message{
         .{ .name = "format", .signature = "u", .types = &.{null} },
@@ -142,11 +142,11 @@ const wl_seat = struct {
         .{ .name = "get_pointer", .signature = "n", .types = &.{&wl_pointer_interface} },
         .{ .name = "get_keyboard", .signature = "n", .types = &.{&wl_keyboard_interface} },
         .{ .name = "get_touch", .signature = "n", .types = &.{null} },
-        .{ .name = "release", .signature = "", .types = &.{} },
+        .{ .name = "release", .signature = "5", .types = &.{} },
     };
     const events = [_]wl_message{
         .{ .name = "capabilities", .signature = "u", .types = &.{null} },
-        .{ .name = "name", .signature = "s", .types = &.{null} },
+        .{ .name = "name", .signature = "2s", .types = &.{null} },
     };
 };
 
@@ -154,7 +154,7 @@ pub const wl_seat_interface = wl_interface{ .name = "wl_seat", .version = 11, .m
 
 const wl_keyboard = struct {
     const methods = [_]wl_message{
-        .{ .name = "release", .signature = "", .types = &.{} },
+        .{ .name = "release", .signature = "3", .types = &.{} },
     };
     const events = [_]wl_message{
         .{ .name = "keymap", .signature = "uhu", .types = &.{null, null, null} },
@@ -162,7 +162,7 @@ const wl_keyboard = struct {
         .{ .name = "leave", .signature = "uo", .types = &.{null, &wl_surface_interface} },
         .{ .name = "key", .signature = "uuuu", .types = &.{null, null, null, null} },
         .{ .name = "modifiers", .signature = "uuuuu", .types = &.{null, null, null, null, null} },
-        .{ .name = "repeat_info", .signature = "ii", .types = &.{null, null} },
+        .{ .name = "repeat_info", .signature = "4ii", .types = &.{null, null} },
     };
 };
 
@@ -170,8 +170,8 @@ pub const wl_keyboard_interface = wl_interface{ .name = "wl_keyboard", .version 
 
 const wl_pointer = struct {
     const methods = [_]wl_message{
-        .{ .name = "set_cursor", .signature = "uoii", .types = &.{null, &wl_surface_interface, null, null} },
-        .{ .name = "release", .signature = "", .types = &.{} },
+        .{ .name = "set_cursor", .signature = "u?oii", .types = &.{null, &wl_surface_interface, null, null} },
+        .{ .name = "release", .signature = "3", .types = &.{} },
     };
     const events = [_]wl_message{
         .{ .name = "enter", .signature = "uoff", .types = &.{null, &wl_surface_interface, null, null} },
@@ -179,13 +179,13 @@ const wl_pointer = struct {
         .{ .name = "motion", .signature = "uff", .types = &.{null, null, null} },
         .{ .name = "button", .signature = "uuuu", .types = &.{null, null, null, null} },
         .{ .name = "axis", .signature = "uuf", .types = &.{null, null, null} },
-        .{ .name = "frame", .signature = "", .types = &.{} },
-        .{ .name = "axis_source", .signature = "u", .types = &.{null} },
-        .{ .name = "axis_stop", .signature = "uu", .types = &.{null, null} },
-        .{ .name = "axis_discrete", .signature = "ui", .types = &.{null, null} },
-        .{ .name = "axis_value120", .signature = "ui", .types = &.{null, null} },
-        .{ .name = "axis_relative_direction", .signature = "uu", .types = &.{null, null} },
-        .{ .name = "warp", .signature = "ff", .types = &.{null, null} },
+        .{ .name = "frame", .signature = "5", .types = &.{} },
+        .{ .name = "axis_source", .signature = "5u", .types = &.{null} },
+        .{ .name = "axis_stop", .signature = "5uu", .types = &.{null, null} },
+        .{ .name = "axis_discrete", .signature = "5ui", .types = &.{null, null} },
+        .{ .name = "axis_value120", .signature = "8ui", .types = &.{null, null} },
+        .{ .name = "axis_relative_direction", .signature = "9uu", .types = &.{null, null} },
+        .{ .name = "warp", .signature = "11ff", .types = &.{null, null} },
     };
 };
 
@@ -193,15 +193,15 @@ pub const wl_pointer_interface = wl_interface{ .name = "wl_pointer", .version = 
 
 const wl_output = struct {
     const methods = [_]wl_message{
-        .{ .name = "release", .signature = "", .types = &.{} },
+        .{ .name = "release", .signature = "3", .types = &.{} },
     };
     const events = [_]wl_message{
         .{ .name = "geometry", .signature = "iiiiissi", .types = &.{null, null, null, null, null, null, null, null} },
         .{ .name = "mode", .signature = "uiii", .types = &.{null, null, null, null} },
-        .{ .name = "done", .signature = "", .types = &.{} },
-        .{ .name = "scale", .signature = "i", .types = &.{null} },
-        .{ .name = "name", .signature = "s", .types = &.{null} },
-        .{ .name = "description", .signature = "s", .types = &.{null} },
+        .{ .name = "done", .signature = "2", .types = &.{} },
+        .{ .name = "scale", .signature = "2i", .types = &.{null} },
+        .{ .name = "name", .signature = "4s", .types = &.{null} },
+        .{ .name = "description", .signature = "4s", .types = &.{null} },
     };
 };
 
@@ -237,7 +237,7 @@ const wl_data_device_manager = struct {
     const methods = [_]wl_message{
         .{ .name = "create_data_source", .signature = "n", .types = &.{&wl_data_source_interface} },
         .{ .name = "get_data_device", .signature = "no", .types = &.{&wl_data_device_interface, &wl_seat_interface} },
-        .{ .name = "release", .signature = "", .types = &.{} },
+        .{ .name = "release", .signature = "4", .types = &.{} },
     };
     const events = [_]wl_message{
     };
@@ -247,17 +247,17 @@ pub const wl_data_device_manager_interface = wl_interface{ .name = "wl_data_devi
 
 const wl_data_device = struct {
     const methods = [_]wl_message{
-        .{ .name = "start_drag", .signature = "ooou", .types = &.{&wl_data_source_interface, &wl_surface_interface, &wl_surface_interface, null} },
-        .{ .name = "set_selection", .signature = "ou", .types = &.{&wl_data_source_interface, null} },
-        .{ .name = "release", .signature = "", .types = &.{} },
+        .{ .name = "start_drag", .signature = "?oo?ou", .types = &.{&wl_data_source_interface, &wl_surface_interface, &wl_surface_interface, null} },
+        .{ .name = "set_selection", .signature = "?ou", .types = &.{&wl_data_source_interface, null} },
+        .{ .name = "release", .signature = "2", .types = &.{} },
     };
     const events = [_]wl_message{
         .{ .name = "data_offer", .signature = "n", .types = &.{&wl_data_offer_interface} },
-        .{ .name = "enter", .signature = "uoffo", .types = &.{null, &wl_surface_interface, null, null, &wl_data_offer_interface} },
+        .{ .name = "enter", .signature = "uoff?o", .types = &.{null, &wl_surface_interface, null, null, &wl_data_offer_interface} },
         .{ .name = "leave", .signature = "", .types = &.{} },
         .{ .name = "motion", .signature = "uff", .types = &.{null, null, null} },
         .{ .name = "drop", .signature = "", .types = &.{} },
-        .{ .name = "selection", .signature = "o", .types = &.{&wl_data_offer_interface} },
+        .{ .name = "selection", .signature = "?o", .types = &.{&wl_data_offer_interface} },
     };
 };
 
@@ -265,16 +265,16 @@ pub const wl_data_device_interface = wl_interface{ .name = "wl_data_device", .ve
 
 const wl_data_offer = struct {
     const methods = [_]wl_message{
-        .{ .name = "accept", .signature = "us", .types = &.{null, null} },
+        .{ .name = "accept", .signature = "u?s", .types = &.{null, null} },
         .{ .name = "receive", .signature = "sh", .types = &.{null, null} },
         .{ .name = "destroy", .signature = "", .types = &.{} },
-        .{ .name = "finish", .signature = "", .types = &.{} },
-        .{ .name = "set_actions", .signature = "uu", .types = &.{null, null} },
+        .{ .name = "finish", .signature = "3", .types = &.{} },
+        .{ .name = "set_actions", .signature = "3uu", .types = &.{null, null} },
     };
     const events = [_]wl_message{
         .{ .name = "offer", .signature = "s", .types = &.{null} },
-        .{ .name = "source_actions", .signature = "u", .types = &.{null} },
-        .{ .name = "action", .signature = "u", .types = &.{null} },
+        .{ .name = "source_actions", .signature = "3u", .types = &.{null} },
+        .{ .name = "action", .signature = "3u", .types = &.{null} },
     };
 };
 
@@ -284,15 +284,15 @@ const wl_data_source = struct {
     const methods = [_]wl_message{
         .{ .name = "offer", .signature = "s", .types = &.{null} },
         .{ .name = "destroy", .signature = "", .types = &.{} },
-        .{ .name = "set_actions", .signature = "u", .types = &.{null} },
+        .{ .name = "set_actions", .signature = "3u", .types = &.{null} },
     };
     const events = [_]wl_message{
-        .{ .name = "target", .signature = "s", .types = &.{null} },
+        .{ .name = "target", .signature = "?s", .types = &.{null} },
         .{ .name = "send", .signature = "sh", .types = &.{null, null} },
         .{ .name = "cancelled", .signature = "", .types = &.{} },
-        .{ .name = "dnd_drop_performed", .signature = "", .types = &.{} },
-        .{ .name = "dnd_finished", .signature = "", .types = &.{} },
-        .{ .name = "action", .signature = "u", .types = &.{null} },
+        .{ .name = "dnd_drop_performed", .signature = "3", .types = &.{} },
+        .{ .name = "dnd_finished", .signature = "3", .types = &.{} },
+        .{ .name = "action", .signature = "3u", .types = &.{null} },
     };
 };
 
@@ -321,9 +321,9 @@ const xdg_positioner = struct {
         .{ .name = "set_gravity", .signature = "u", .types = &.{null} },
         .{ .name = "set_constraint_adjustment", .signature = "u", .types = &.{null} },
         .{ .name = "set_offset", .signature = "ii", .types = &.{null, null} },
-        .{ .name = "set_reactive", .signature = "", .types = &.{} },
-        .{ .name = "set_parent_size", .signature = "ii", .types = &.{null, null} },
-        .{ .name = "set_parent_configure", .signature = "u", .types = &.{null} },
+        .{ .name = "set_reactive", .signature = "3", .types = &.{} },
+        .{ .name = "set_parent_size", .signature = "3ii", .types = &.{null, null} },
+        .{ .name = "set_parent_configure", .signature = "3u", .types = &.{null} },
     };
     const events = [_]wl_message{
     };
@@ -335,12 +335,12 @@ const xdg_popup = struct {
     const methods = [_]wl_message{
         .{ .name = "destroy", .signature = "", .types = &.{} },
         .{ .name = "grab", .signature = "ou", .types = &.{&wl_seat_interface, null} },
-        .{ .name = "reposition", .signature = "ou", .types = &.{&xdg_positioner_interface, null} },
+        .{ .name = "reposition", .signature = "3ou", .types = &.{&xdg_positioner_interface, null} },
     };
     const events = [_]wl_message{
         .{ .name = "configure", .signature = "iiii", .types = &.{null, null, null, null} },
         .{ .name = "popup_done", .signature = "", .types = &.{} },
-        .{ .name = "repositioned", .signature = "u", .types = &.{null} },
+        .{ .name = "repositioned", .signature = "3u", .types = &.{null} },
     };
 };
 
@@ -350,7 +350,7 @@ const xdg_surface = struct {
     const methods = [_]wl_message{
         .{ .name = "destroy", .signature = "", .types = &.{} },
         .{ .name = "get_toplevel", .signature = "n", .types = &.{&xdg_toplevel_interface} },
-        .{ .name = "get_popup", .signature = "noo", .types = &.{&xdg_popup_interface, null, &xdg_positioner_interface} },
+        .{ .name = "get_popup", .signature = "n?oo", .types = &.{&xdg_popup_interface, null, &xdg_positioner_interface} },
         .{ .name = "set_window_geometry", .signature = "iiii", .types = &.{null, null, null, null} },
         .{ .name = "ack_configure", .signature = "u", .types = &.{null} },
     };
@@ -364,7 +364,7 @@ pub const xdg_surface_interface = wl_interface{ .name = "xdg_surface", .version 
 const xdg_toplevel = struct {
     const methods = [_]wl_message{
         .{ .name = "destroy", .signature = "", .types = &.{} },
-        .{ .name = "set_parent", .signature = "o", .types = &.{null} },
+        .{ .name = "set_parent", .signature = "?o", .types = &.{null} },
         .{ .name = "set_title", .signature = "s", .types = &.{null} },
         .{ .name = "set_app_id", .signature = "s", .types = &.{null} },
         .{ .name = "show_window_menu", .signature = "ouii", .types = &.{&wl_seat_interface, null, null, null} },
@@ -374,15 +374,15 @@ const xdg_toplevel = struct {
         .{ .name = "set_min_size", .signature = "ii", .types = &.{null, null} },
         .{ .name = "set_maximized", .signature = "", .types = &.{} },
         .{ .name = "unset_maximized", .signature = "", .types = &.{} },
-        .{ .name = "set_fullscreen", .signature = "o", .types = &.{&wl_output_interface} },
+        .{ .name = "set_fullscreen", .signature = "?o", .types = &.{&wl_output_interface} },
         .{ .name = "unset_fullscreen", .signature = "", .types = &.{} },
         .{ .name = "set_minimized", .signature = "", .types = &.{} },
     };
     const events = [_]wl_message{
         .{ .name = "configure", .signature = "iia", .types = &.{null, null, null} },
         .{ .name = "close", .signature = "", .types = &.{} },
-        .{ .name = "configure_bounds", .signature = "ii", .types = &.{null, null} },
-        .{ .name = "wm_capabilities", .signature = "a", .types = &.{null} },
+        .{ .name = "configure_bounds", .signature = "4ii", .types = &.{null, null} },
+        .{ .name = "wm_capabilities", .signature = "5a", .types = &.{null} },
     };
 };
 

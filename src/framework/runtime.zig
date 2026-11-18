@@ -214,7 +214,7 @@ pub fn uriListToPaths(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 /// pipelines, UI state, input, clipboard, and the frame loop.
 pub const Runtime = struct {
     opts: Options,
-    conn: wayland.Connection,
+    conn: *wayland.Connection,
     ids: wayland.ObjectIds = .{},
     // bound globals
     g_compositor: u32 = 0,
@@ -347,30 +347,30 @@ pub const Runtime = struct {
         }
         if (output_g) |og| {
             self.ids.output = try self.conn.bindGlobal("wl_output", &wayland.wl_output_interface, @min(og.version, 4));
-            wayland.listenOutput(&self.conn, self.ids.output.?);
+            wayland.listenOutput(self.conn, self.ids.output.?);
         }
         self.ids.compositor = try self.conn.bindGlobal("wl_compositor", &wayland.wl_compositor_interface, @min(compositor_g.version, 4));
         self.ids.shm = try self.conn.bindGlobal("wl_shm", &wayland.wl_shm_interface, @min(shm_g.version, 1));
-        wayland.listenShm(&self.conn, self.ids.shm.?);
+        wayland.listenShm(self.conn, self.ids.shm.?);
         self.ids.wm_base = try self.conn.bindGlobal("xdg_wm_base", &wayland.xdg_wm_base_interface, @min(wm_base_g.version, 6));
-        wayland.listenWmBase(&self.conn, self.ids.wm_base.?);
+        wayland.listenWmBase(self.conn, self.ids.wm_base.?);
         self.ids.seat = try self.conn.bindGlobal("wl_seat", &wayland.wl_seat_interface, @min(seat_g.version, 5));
-        wayland.listenSeat(&self.conn, self.ids.seat.?);
+        wayland.listenSeat(self.conn, self.ids.seat.?);
         self.ids.linux_dmabuf = try self.conn.bindGlobal("wl_data_device_manager", &wayland.wl_data_device_manager_interface, @min(dm_g.version, 3));
 
         // Surface + xdg shell.
         // Surface + xdg shell.
-        self.surface = try wayland.compositorCreateSurface(&self.conn, self.ids.compositor.?);
-        self.xdg_surface = try wayland.wmBaseCreateXdgSurface(&self.conn, self.ids.wm_base.?, self.surface);
-        wayland.listenXdgSurface(&self.conn, self.xdg_surface);
-        self.toplevel = try wayland.xdgSurfaceGetToplevel(&self.conn, self.xdg_surface);
-        wayland.listenToplevel(&self.conn, self.toplevel);
-        wayland.toplevelSetTitle(&self.conn, self.toplevel, opts.title);
-        wayland.toplevelSetAppId(&self.conn, self.toplevel, opts.app_id);
+        self.surface = try wayland.compositorCreateSurface(self.conn, self.ids.compositor.?);
+        self.xdg_surface = try wayland.wmBaseCreateXdgSurface(self.conn, self.ids.wm_base.?, self.surface);
+        wayland.listenXdgSurface(self.conn, self.xdg_surface);
+        self.toplevel = try wayland.xdgSurfaceGetToplevel(self.conn, self.xdg_surface);
+        wayland.listenToplevel(self.conn, self.toplevel);
+        wayland.toplevelSetTitle(self.conn, self.toplevel, opts.title);
+        wayland.toplevelSetAppId(self.conn, self.toplevel, opts.app_id);
         if (self.scale > 1) {
-            wayland.surfaceSetBufferScale(&self.conn, self.surface, @intCast(self.scale));
+            wayland.surfaceSetBufferScale(self.conn, self.surface, @intCast(self.scale));
         }
-        wayland.surfaceCommit(&self.conn, self.surface);
+        wayland.surfaceCommit(self.conn, self.surface);
 
         // Blocking wait for the first configure (socket still blocking).
         var configured = false;
@@ -380,7 +380,7 @@ pub const Runtime = struct {
             for (self.conn.events.items) |*event| {
                 if (debug_init_events) std.debug.print("cipher: event sender={d} opcode={d} len={d}\n", .{ event.sender, event.opcode, event.payload().len });
                 if (event.sender == self.xdg_surface and event.opcode == 0) {
-                    wayland.xdgSurfaceAckConfigure(&self.conn, self.xdg_surface, event.read32(0));
+                    wayland.xdgSurfaceAckConfigure(self.conn, self.xdg_surface, event.read32(0));
                     configured = true;
                 }
                 try self.dispatchInitEvent(event);
@@ -475,16 +475,16 @@ pub const Runtime = struct {
 
     fn onSeatCapabilities(self: *Runtime, caps: u32) !void {
         if (caps & 2 != 0 and self.keyboard == null) {
-            self.keyboard = try wayland.seatGetKeyboard(&self.conn, self.ids.seat.?);
-            wayland.listenKeyboard(&self.conn, self.keyboard.?);
+            self.keyboard = try wayland.seatGetKeyboard(self.conn, self.ids.seat.?);
+            wayland.listenKeyboard(self.conn, self.keyboard.?);
         }
         if (caps & 1 != 0 and self.pointer == null) {
-            self.pointer = try wayland.seatGetPointer(&self.conn, self.ids.seat.?);
-            wayland.listenPointer(&self.conn, self.pointer.?);
+            self.pointer = try wayland.seatGetPointer(self.conn, self.ids.seat.?);
+            wayland.listenPointer(self.conn, self.pointer.?);
         }
         if (self.data_device == null) {
-            const dd = try wayland.dataDeviceManagerGetDataDevice(&self.conn, self.ids.linux_dmabuf.?, self.ids.seat.?);
-            wayland.listenDataDevice(&self.conn, dd);
+            const dd = try wayland.dataDeviceManagerGetDataDevice(self.conn, self.ids.linux_dmabuf.?, self.ids.seat.?);
+            wayland.listenDataDevice(self.conn, dd);
             self.data_device = dd;
         }
     }
@@ -503,27 +503,27 @@ pub const Runtime = struct {
         const lh = self.height / self.scale;
         self.scale = ns;
         if (self.surface != 0) {
-            wayland.surfaceSetBufferScale(&self.conn, self.surface, @intCast(ns));
+            wayland.surfaceSetBufferScale(self.conn, self.surface, @intCast(ns));
         }
         if (self.logical_w != 0) try self.resize(self.logical_w, self.logical_h);
         std.debug.print("cipher: wl_output.scale -> {d} ({d}x{d} device px)\n", .{ ns, lw * ns, lh * ns });
     }
 
     fn makeShmObjects(self: *Runtime) !void {
-        self.shm_pool = try wayland.shmCreatePool(&self.conn, self.ids.shm.?, self.shm_buf.fd, @intCast(self.shm_buf.pixels.len));
-        self.buffer = try wayland.shmPoolCreateBuffer(&self.conn, self.shm_pool, 0, @intCast(self.width), @intCast(self.height), @intCast(self.shm_buf.stride), 0);
+        self.shm_pool = try wayland.shmCreatePool(self.conn, self.ids.shm.?, self.shm_buf.fd, @intCast(self.shm_buf.pixels.len));
+        self.buffer = try wayland.shmPoolCreateBuffer(self.conn, self.shm_pool, 0, @intCast(self.width), @intCast(self.height), @intCast(self.shm_buf.stride), 0);
     }
 
     pub fn deinit(self: *Runtime) void {
-        if (self.keyboard) |id| wayland.keyboardRelease(&self.conn, id);
-        if (self.pointer) |id| wayland.pointerRelease(&self.conn, id);
-        if (self.data_device) |id| wayland.dataDeviceRelease(&self.conn, id);
-        if (self.data_source) |id| wayland.dataSourceDestroy(&self.conn, id);
-        if (self.toplevel != 0) wayland.xdgToplevelDestroy(&self.conn, self.toplevel);
-        if (self.xdg_surface != 0) wayland.xdgSurfaceDestroy(&self.conn, self.xdg_surface);
-        if (self.buffer != 0) wayland.bufferDestroy(&self.conn, self.buffer);
-        if (self.shm_pool != 0) wayland.shmPoolDestroy(&self.conn, self.shm_pool);
-        if (self.surface != 0) wayland.surfaceDestroy(&self.conn, self.surface);
+        if (self.keyboard) |id| wayland.keyboardRelease(self.conn, id);
+        if (self.pointer) |id| wayland.pointerRelease(self.conn, id);
+        if (self.data_device) |id| wayland.dataDeviceRelease(self.conn, id);
+        if (self.data_source) |id| wayland.dataSourceDestroy(self.conn, id);
+        if (self.toplevel != 0) wayland.xdgToplevelDestroy(self.conn, self.toplevel);
+        if (self.xdg_surface != 0) wayland.xdgSurfaceDestroy(self.conn, self.xdg_surface);
+        if (self.buffer != 0) wayland.bufferDestroy(self.conn, self.buffer);
+        if (self.shm_pool != 0) wayland.shmPoolDestroy(self.conn, self.shm_pool);
+        if (self.surface != 0) wayland.surfaceDestroy(self.conn, self.surface);
         if (self.ui_state) |*u| u.deinit();
         if (self.gt) |*g| g.deinitSoft(&self.vk, &self.dev);
         if (self.atlas) |a| {
@@ -536,7 +536,7 @@ pub const Runtime = struct {
         self.pending_events.deinit(std.heap.page_allocator);
         self.events_arena.deinit();
         std.heap.page_allocator.free(self.quads_buf);
-        self.conn.disconnect();
+        self.conn.destroy();
     }
 
     /// Recreate shm buffer + GPU target at a new size.
@@ -550,11 +550,11 @@ pub const Runtime = struct {
         if (w == self.width and h == self.height) return;
         // destroy old buffer/pool objects
         if (self.buffer != 0) {
-            wayland.bufferDestroy(&self.conn, self.buffer);
+            wayland.bufferDestroy(self.conn, self.buffer);
             self.buffer = 0;
         }
         if (self.shm_pool != 0) {
-            wayland.shmPoolDestroy(&self.conn, self.shm_pool);
+            wayland.shmPoolDestroy(self.conn, self.shm_pool);
             self.shm_pool = 0;
         }
         self.shm_buf.deinit();
@@ -567,7 +567,7 @@ pub const Runtime = struct {
         // without an integer mapping (wl_output.scale reports scale 1 for
         // fractional modes, so surface pixels are delivered 1:1).
         if (self.scale > 1) {
-            wayland.surfaceSetBufferScale(&self.conn, self.surface, @intCast(self.scale));
+            wayland.surfaceSetBufferScale(self.conn, self.surface, @intCast(self.scale));
         }
         if (self.gt) |*g| {
             g.deinitSoft(&self.vk, &self.dev);
@@ -598,13 +598,13 @@ pub const Runtime = struct {
     /// Set the system clipboard to UTF-8 text (used for copy/paste).
     pub fn setClipboard(self: *Runtime, text: []const u8) !void {
         const dd = self.data_device orelse return error.NoDataDevice;
-        const src = try wayland.dataDeviceManagerCreateDataSource(&self.conn, self.ids.linux_dmabuf.?);
-        wayland.listenDataSource(&self.conn, src);
-        wayland.dataSourceOffer(&self.conn, src, "text/plain;charset=utf-8");
+        const src = try wayland.dataDeviceManagerCreateDataSource(self.conn, self.ids.linux_dmabuf.?);
+        wayland.listenDataSource(self.conn, src);
+        wayland.dataSourceOffer(self.conn, src, "text/plain;charset=utf-8");
         if (self.clipboard_text) |old| std.heap.page_allocator.free(old);
         self.clipboard_text = try std.heap.page_allocator.dupe(u8, text);
         self.data_source = src;
-        wayland.dataDeviceSetSelection(&self.conn, dd, src, self.selection_serial);
+        wayland.dataDeviceSetSelection(self.conn, dd, src, self.selection_serial);
     }
 
     // ---- event dispatch ----
@@ -769,7 +769,7 @@ pub const Runtime = struct {
         }
         if (event.sender == self.xdg_surface) {
             if (event.opcode == 0) { // configure
-                wayland.xdgSurfaceAckConfigure(&self.conn, self.xdg_surface, event.read32(0));
+                wayland.xdgSurfaceAckConfigure(self.conn, self.xdg_surface, event.read32(0));
             }
             return;
         }
@@ -799,7 +799,7 @@ pub const Runtime = struct {
             return;
         }
         if (self.ids.wm_base != null and event.sender == self.ids.wm_base.? and event.opcode == 0) {
-            wayland.wmBasePong(&self.conn, self.ids.wm_base.?, event.read32(0));
+            wayland.wmBasePong(self.conn, self.ids.wm_base.?, event.read32(0));
             return;
         }
         if (self.frame_cb != null and event.sender == self.frame_cb.?) {
@@ -833,16 +833,27 @@ pub const Runtime = struct {
             return;
         // pipe: compositor writes into our write end
         var fds: [2]i32 = undefined;
-        const prc = std.os.linux.pipe2(&fds, .{ .CLOEXEC = true });
+        const prc = std.os.linux.pipe2(&fds, .{ .CLOEXEC = true, .NONBLOCK = true });
         if (@as(i64, @bitCast(prc)) < 0) return error.PipeFailed;
-        wayland.dataOfferAccept(&self.conn, offer, self.selection_serial, mime);
-        wayland.dataOfferReceive(&self.conn, offer, mime, fds[1]);
+        wayland.dataOfferAccept(self.conn, offer, self.selection_serial, mime);
+        wayland.dataOfferReceive(self.conn, offer, mime, fds[1]);
         _ = std.c.close(fds[1]);
         var data = std.ArrayList(u8).empty;
         defer data.deinit(std.heap.page_allocator);
         var chunk: [4096]u8 = undefined;
-        while (true) {
-            const n = std.posix.read(fds[0], &chunk) catch break;
+        // Bounded wait: a local clipboard source answers within a frame or two;
+        // a dead/remote source must not wedge the frame loop.
+        var waited_ms: i32 = 0;
+        var pfd = [_]std.posix.pollfd{.{ .fd = fds[0], .events = std.posix.POLL.IN, .revents = 0 }};
+        while (waited_ms < 500) {
+            const n = std.posix.read(fds[0], &chunk) catch |e| switch (e) {
+                error.WouldBlock => {
+                    const rc = std.posix.poll(&pfd, 25) catch break;
+                    if (rc == 0) waited_ms += 25 else waited_ms = 0;
+                    continue;
+                },
+                else => break,
+            };
             if (n == 0) break;
             try data.appendSlice(std.heap.page_allocator, chunk[0..n]);
         }
@@ -951,13 +962,13 @@ pub const Runtime = struct {
         _ = self.events_arena.reset(.free_all);
 
         // attach + damage + commit
-        wayland.surfaceAttach(&self.conn, self.surface, self.buffer, 0, 0);
-        wayland.surfaceDamage(&self.conn, self.surface, 0, 0, @intCast(self.logical_w), @intCast(self.logical_h));
-        wayland.surfaceCommit(&self.conn, self.surface);
+        wayland.surfaceAttach(self.conn, self.surface, self.buffer, 0, 0);
+        wayland.surfaceDamage(self.conn, self.surface, 0, 0, @intCast(self.logical_w), @intCast(self.logical_h));
+        wayland.surfaceCommit(self.conn, self.surface);
 
         // request next vsync frame callback
-        self.frame_cb = wayland.surfaceFrame(&self.conn, self.surface) catch null;
-        wayland.surfaceCommit(&self.conn, self.surface);
+        self.frame_cb = wayland.surfaceFrame(self.conn, self.surface) catch null;
+        wayland.surfaceCommit(self.conn, self.surface);
     }
 
     fn dumpFrame(self: *Runtime, n: u32) void {
