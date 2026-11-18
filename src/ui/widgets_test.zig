@@ -46,26 +46,26 @@ test "slider: drag sets value proportionally" {
     var value: f32 = 0;
 
     // frame 1: no mouse — establishes rect
-    try ui.begin(400, 300, 0, 0, false, false);
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
     try widgets.slider(ui, 200, 0, 100, &value);
     try ui.end();
     const r = ui.widgetRect(1) orelse return error.NoRect;
     try std.testing.expectApproxEqAbs(@as(f32, 200), r.w, 0.01);
 
     // frame 2: press at 75% of the track -> value ~75
-    try ui.begin(400, 300, r.x + r.w * 0.75, r.y + r.h / 2, true, true);
+    try ui.begin(400, 300, r.x + r.w * 0.75, r.y + r.h / 2, true, true, 1.0);
     try widgets.slider(ui, 200, 0, 100, &value);
     try ui.end();
     try std.testing.expectApproxEqAbs(@as(f32, 75), value, 2.0);
 
     // frame 3: keep dragging to 10%
-    try ui.begin(400, 300, r.x + r.w * 0.10, r.y + r.h / 2, true, false);
+    try ui.begin(400, 300, r.x + r.w * 0.10, r.y + r.h / 2, true, false, 1.0);
     try widgets.slider(ui, 200, 0, 100, &value);
     try ui.end();
     try std.testing.expectApproxEqAbs(@as(f32, 10), value, 2.0);
 
     // frame 4: release far right but not dragging -> clamps to last value <= max
-    try ui.begin(400, 300, r.x + r.w * 2, r.y + r.h / 2, false, false);
+    try ui.begin(400, 300, r.x + r.w * 2, r.y + r.h / 2, false, false, 1.0);
     try widgets.slider(ui, 200, 0, 100, &value);
     try ui.end();
     try std.testing.expect(value <= 100 and value >= 9);
@@ -81,16 +81,16 @@ test "checkbox: click toggles" {
     defer s.at.deinit();
     const ui = s.ui;
     var v = false;
-    try ui.begin(400, 300, 0, 0, false, false);
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
     _ = try widgets.checkbox(ui, "x", &v);
     try ui.end();
     const r = ui.widgetRect(1).?;
     try std.testing.expect(!v);
-    try ui.begin(400, 300, r.x + 5, r.y + 5, true, true);
+    try ui.begin(400, 300, r.x + 5, r.y + 5, true, true, 1.0);
     const t1 = try widgets.checkbox(ui, "x", &v);
     try ui.end();
     try std.testing.expect(t1 and v);
-    try ui.begin(400, 300, 300, 250, true, true); // click elsewhere
+    try ui.begin(400, 300, 300, 250, true, true, 1.0); // click elsewhere
     const t2 = try widgets.checkbox(ui, "x", &v);
     try ui.end();
     try std.testing.expect(!t2 and v);
@@ -108,20 +108,20 @@ test "list: click selects row, wheel scrolls" {
     const items = [_][]const u8{ "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta" };
     var sel: i32 = -1;
     // frame 1: establish rect
-    try ui.begin(400, 300, 0, 0, false, false);
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
     try widgets.listView(ui, 200, 4, &items, &sel);
     try ui.end();
     const r = ui.widgetRect(1).?;
     try std.testing.expectEqual(@as(i32, -1), sel);
     // frame 2: click second row
     const lh = @as(f32, @floatFromInt(ui.atlas.font.ascender - ui.atlas.font.descender + ui.atlas.font.line_gap)) * ui.atlas.scale;
-    try ui.begin(400, 300, r.x + 20, r.y + 2 + lh * 1.5, true, true);
+    try ui.begin(400, 300, r.x + 20, r.y + 2 + lh * 1.5, true, true, 1.0);
     try widgets.listView(ui, 200, 4, &items, &sel);
     try ui.end();
     try std.testing.expectEqual(@as(i32, 1), sel);
     // frame 3: wheel down 2 notches while hovered
     const wheel_ev = [_]input.Event{.{ .wheel = .{ .dx = 0, .dy = 2 } }};
-    try ui.begin(400, 300, r.x + 20, r.y + 10, false, false);
+    try ui.begin(400, 300, r.x + 20, r.y + 10, false, false, 1.0);
     ui.events = &wheel_ev;
     try widgets.listView(ui, 200, 4, &items, &sel);
     try ui.end();
@@ -139,31 +139,31 @@ test "textInput: click focuses, keys edit, paste inserts" {
     const ui = s.ui;
     var storage: [256]u8 = undefined;
     // frame 1: establish rect, click inside to focus
-    try ui.begin(400, 300, 0, 0, false, false);
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
     _ = try widgets.textInput(ui, 260, storage[0..0], "type here");
     try ui.end();
     const r = ui.widgetRect(1).?;
     // frame 2: click inside
-    try ui.begin(400, 300, r.x + 10, r.y + 5, true, true);
+    try ui.begin(400, 300, r.x + 10, r.y + 5, true, true, 1.0);
     _ = try widgets.textInput(ui, 260, storage[0..0], "type here");
     try ui.end();
     // frame 3: type 'h','i' (key 35 = h, 23 = i)
     const evs = [_]input.Event{ keyEvent(35, true), keyEvent(35, false), keyEvent(23, true), keyEvent(23, false) };
-    try ui.begin(400, 300, r.x + 10, r.y + 5, false, false);
+    try ui.begin(400, 300, r.x + 10, r.y + 5, false, false, 1.0);
     ui.events = &evs;
     const out = try widgets.textInput(ui, 260, storage[0..0], "type here");
     try ui.end();
     try std.testing.expectEqualStrings("hi", out);
     // frame 4: backspace removes 'i'
     const evs2 = [_]input.Event{keyEvent(14, true)};
-    try ui.begin(400, 300, r.x + 10, r.y + 5, false, false);
+    try ui.begin(400, 300, r.x + 10, r.y + 5, false, false, 1.0);
     ui.events = &evs2;
     const out2 = try widgets.textInput(ui, 260, storage[0..0], "type here");
     try ui.end();
     try std.testing.expectEqualStrings("h", out2);
     // frame 5: paste "xy" appends at cursor (end)
     const evs3 = [_]input.Event{.{ .paste = "xy" }};
-    try ui.begin(400, 300, r.x + 10, r.y + 5, false, false);
+    try ui.begin(400, 300, r.x + 10, r.y + 5, false, false, 1.0);
     ui.events = &evs3;
     const out3 = try widgets.textInput(ui, 260, storage[0..0], "type here");
     try ui.end();
@@ -181,13 +181,13 @@ test "tabs: click selects tab" {
     const ui = s.ui;
     const labels = [_][]const u8{ "Library", "Queue", "Lyrics" };
     var sel: i32 = 0;
-    try ui.begin(400, 300, 0, 0, false, false);
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
     try widgets.tabs(ui, &labels, &sel);
     try ui.end();
     try std.testing.expectEqual(@as(i32, 0), sel);
     // tab i has id base_id+1+i; base_id=1 -> tab 2 is id 4
     const r2 = ui.widgetRect(4).?;
-    try ui.begin(400, 300, r2.x + r2.w / 2, r2.y + r2.h / 2, true, true);
+    try ui.begin(400, 300, r2.x + r2.w / 2, r2.y + r2.h / 2, true, true, 1.0);
     try widgets.tabs(ui, &labels, &sel);
     try ui.end();
     try std.testing.expectEqual(@as(i32, 2), sel);
@@ -204,7 +204,7 @@ test "focus: Tab cycles buttons, Enter activates, ring appears only after Tab" {
     const ui = s.ui;
 
     // frame 1 (no events): first button owns focus; Enter activates it
-    try ui.begin(400, 300, 0, 0, false, false);
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
     const b1 = try ui.button("Alpha");
     const b2 = try ui.button("Beta");
     try ui.end();
@@ -216,7 +216,7 @@ test "focus: Tab cycles buttons, Enter activates, ring appears only after Tab" {
     const ev_tab = [_]input.Event{ keyEvent(15, true) };
     const ev_none = [_]input.Event{};
     ui.events = &ev_enter;
-    try ui.begin(400, 300, 0, 0, false, false);
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
     const a1 = try ui.button("Alpha");
     const a2 = try ui.button("Beta");
     try ui.end();
@@ -226,7 +226,7 @@ test "focus: Tab cycles buttons, Enter activates, ring appears only after Tab" {
 
     // frame: press Tab -> focus moves to button 2 (pos 1), ring becomes visible
     ui.events = &ev_tab;
-    try ui.begin(400, 300, 0, 0, false, false);
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
     _ = try ui.button("Alpha");
     _ = try ui.button("Beta");
     try ui.end();
@@ -235,7 +235,7 @@ test "focus: Tab cycles buttons, Enter activates, ring appears only after Tab" {
 
     // frame: Enter now activates only button 2
     ui.events = &ev_enter;
-    try ui.begin(400, 300, 0, 0, false, false);
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
     const c1 = try ui.button("Alpha");
     const c2 = try ui.button("Beta");
     try ui.end();
@@ -245,7 +245,7 @@ test "focus: Tab cycles buttons, Enter activates, ring appears only after Tab" {
 
     // ring persists once visible (focus-visible latched): frame-1 count + 4 ring rects
     ui.events = &ev_none;
-    try ui.begin(400, 300, 0, 0, false, false);
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
     _ = try ui.button("Alpha");
     _ = try ui.button("Beta");
     try ui.end();
@@ -265,7 +265,7 @@ test "focus: Shift-Tab wraps to the last focusable" {
     // shift-tab on the very first widget wraps to the last
     const ev_shifttab = [_]input.Event{.{ .key = .{ .code = 15, .key = .tab, .char = 0x09, .mods = .{ .raw = 0x1 }, .pressed = true } }};
     ui.events = &ev_shifttab;
-    try ui.begin(400, 300, 0, 0, false, false);
+    try ui.begin(400, 300, 0, 0, false, false, 1.0);
     _ = try ui.button("One");
     _ = try ui.button("Two");
     _ = try ui.button("Three");

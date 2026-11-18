@@ -59,6 +59,7 @@ pub const Ui = struct {
     // Focus-visible behavior: the ring only shows after the user presses Tab
     // (keyboard semantics), never after mouse use. Matches toolkit focus-visible.
     kb_visible: bool = false,
+    scale: f32 = 1, // HiDPI: layout runs in logical px; emission multiplies by scale
 
     pub const WidgetState = union(enum) {
         slider: f32,
@@ -101,12 +102,13 @@ pub const Ui = struct {
 
     /// Append a raw rect draw command (for custom widgets).
     pub fn addRect(self: *Ui, r: layout.Rect, color: u32) !void {
-        try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = r, .color = color } });
+        try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = self.scaledRect(r), .color = color } });
     }
 
     /// Append a raw text draw command (for custom widgets).
     pub fn addText(self: *Ui, x: f32, baseline: f32, str: []const u8, color: u32) !void {
-        try self.cmds.append(self.allocator(), .{ .text = .{ .x = x, .baseline = baseline, .str = str, .color = color } });
+        const s = self.scale;
+        try self.cmds.append(self.allocator(), .{ .text = .{ .x = x * s, .baseline = baseline * s, .str = str, .color = color } });
     }
 
     pub fn allocator(self: *Ui) std.mem.Allocator {
@@ -120,17 +122,24 @@ pub const Ui = struct {
         return n;
     }
 
+    /// Rect in device px (layout works in logical px).
+    fn scaledRect(self: *const Ui, r: layout.Rect) layout.Rect {
+        if (self.scale == 1) return r;
+        return .{ .x = r.x * self.scale, .y = r.y * self.scale, .w = r.w * self.scale, .h = r.h * self.scale };
+    }
+
     fn lineHeight(self: *const Ui) f32 {
         const f = self.atlas.font;
-        return @as(f32, @floatFromInt(f.ascender - f.descender + f.line_gap)) * self.atlas.scale;
+        return @as(f32, @floatFromInt(f.ascender - f.descender + f.line_gap)) * self.atlas.scale / self.scale;
     }
 
     fn ascentPx(self: *const Ui) f32 {
-        return @as(f32, @floatFromInt(self.atlas.font.ascender)) * self.atlas.scale;
+        return @as(f32, @floatFromInt(self.atlas.font.ascender)) * self.atlas.scale / self.scale;
     }
 
-    pub fn begin(self: *Ui, w: f32, h: f32, mx: f32, my: f32, mdown: bool, mpressed: bool) !void {
+    pub fn begin(self: *Ui, w: f32, h: f32, mx: f32, my: f32, mdown: bool, mpressed: bool, scale: f32) !void {
         _ = self.arena.reset(.free_all);
+        self.scale = if (scale > 0) scale else 1;
         self.stack = .empty;
         self.cmds = .empty;
         self.hot = 0;
@@ -204,7 +213,7 @@ pub const Ui = struct {
         n.kind = .label;
         n.text = owned;
         n.color = color;
-        n.content_w = try self.atlas.measure(owned);
+        n.content_w = try self.atlas.measure(owned) / self.scale;
         n.content_h = self.lineHeight();
         try self.current().addChild(self.allocator(), n);
     }
@@ -219,7 +228,7 @@ pub const Ui = struct {
         n.kind = .button;
         n.text = try self.allocator().dupe(u8, str);
         n.id = id;
-        n.content_w = try self.atlas.measure(str) + 2 * pad_x;
+        n.content_w = try self.atlas.measure(str) / self.scale + 2 * pad_x;
         n.content_h = self.lineHeight() + 2 * pad_y;
         n.pad = pad_x;
         try self.current().addChild(self.allocator(), n);
@@ -252,9 +261,10 @@ pub const Ui = struct {
     }
 
     /// Paint a 1px accent ring around a node's rect (drawn above everything).
-    fn paintFocusRing(self: *Ui, rect: layout.Rect) !void {
+    fn paintFocusRing(self: *Ui, ring_rect: layout.Rect) !void {
+        const rect = self.scaledRect(ring_rect);
         const c = COLOR_FOCUS_RING;
-        const t: f32 = 1;
+        const t: f32 = 1 * self.scale;
         try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = t }, .color = c } });
         try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = .{ .x = rect.x, .y = rect.y + rect.h - t, .w = rect.w, .h = t }, .color = c } });
         try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = .{ .x = rect.x, .y = rect.y, .w = t, .h = rect.h }, .color = c } });
@@ -275,7 +285,7 @@ pub const Ui = struct {
     fn emitBackgrounds(self: *Ui, n: *layout.Node) !void {
         switch (n.kind) {
             .panel, .button => {
-                try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = n.rect, .color = n.color } });
+                try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = self.scaledRect(n.rect), .color = n.color } });
             },
             else => {},
         }
@@ -286,18 +296,20 @@ pub const Ui = struct {
     fn emitForeground(self: *Ui, n: *layout.Node) !void {
         switch (n.kind) {
             .label => {
+                const s = self.scale;
                 try self.cmds.append(self.allocator(), .{ .text = .{
-                    .x = n.rect.x + n.pad,
-                    .baseline = n.rect.y + self.ascentPx(),
+                    .x = (n.rect.x + n.pad) * s,
+                    .baseline = (n.rect.y + self.ascentPx()) * s,
                     .str = n.text,
                     .color = n.color,
                 } });
             },
             .button => {
-                const tw = try self.atlas.measure(n.text);
+                const tw = try self.atlas.measure(n.text) / self.scale;
+                const s = self.scale;
                 try self.cmds.append(self.allocator(), .{ .text = .{
-                    .x = n.rect.x + (n.rect.w - tw) / 2,
-                    .baseline = n.rect.y + (n.rect.h - self.lineHeight()) / 2 + self.ascentPx(),
+                    .x = (n.rect.x + (n.rect.w - tw) / 2) * s,
+                    .baseline = (n.rect.y + (n.rect.h - self.lineHeight()) / 2 + self.ascentPx()) * s,
                     .str = n.text,
                     .color = if (n.color == COLOR_BUTTON_ACTIVE) COLOR_VOID else COLOR_TEXT,
                 } });

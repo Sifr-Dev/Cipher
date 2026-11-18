@@ -236,7 +236,7 @@ pub fn textInput(ui: *ui_mod.Ui, w: f32, buf: []u8, hint: []const u8) ![]u8 {
         }
         if (focused) {
             const before = text[0..@min(st.text.cursor, text.len)];
-            const tw = ui.atlas.measure(before) catch 0;
+            const tw = (ui.atlas.measure(before) catch 0) / ui.scale;
             try ui.addRect(.{ .x = prev.x + 8 + tw, .y = prev.y + 5, .w = 2, .h = prev.h - 10 }, C.COLOR_TEXT);
         }
     }
@@ -276,7 +276,7 @@ pub fn tabs(ui: *ui_mod.Ui, labels: []const []const u8, sel: *i32) !void {
         if (prev.w > 0) {
             const active = st.tabs == @as(i32, @intCast(i));
             try ui.addRect(prev, if (active) C.COLOR_BUTTON_ACTIVE else C.COLOR_BUTTON);
-            const tw = ui.atlas.measure(lab) catch 0;
+            const tw = (ui.atlas.measure(lab) catch 0) / ui.scale;
             try ui.addText(prev.x + (prev.w - tw) / 2, prev.y + prev.h - 7, lab, if (active) C.COLOR_VOID else C.COLOR_TEXT);
         }
     }

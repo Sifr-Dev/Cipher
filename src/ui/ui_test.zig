@@ -103,7 +103,7 @@ test "ui: panel+label+button emit draw commands; button click hit-tests across f
     defer ui.deinit();
 
     // Frame 1: declare UI, no mouse.
-    try ui.begin(640, 400, 0, 0, false, false);
+    try ui.begin(640, 400, 0, 0, false, false, 1.0);
     try ui.panel(.{ .fixed = 300 }, .{ .fixed = 200 }, 12, 8);
     try ui.label("Cipher", ui_mod.COLOR_TEXT);
     const clicked1 = try ui.button("OK");
@@ -137,7 +137,7 @@ test "ui: panel+label+button emit draw commands; button click hit-tests across f
     std.debug.print("UI_FRAME1_OK cmds=4 button=({d:.1},{d:.1},{d:.1},{d:.1})\n", .{ br.x, br.y, br.w, br.h });
 
     // Frame 2: same UI, mouse pressed at button center -> clicked.
-    try ui.begin(640, 400, br.x + br.w / 2, br.y + br.h / 2, true, true);
+    try ui.begin(640, 400, br.x + br.w / 2, br.y + br.h / 2, true, true, 1.0);
     try ui.panel(.{ .fixed = 300 }, .{ .fixed = 200 }, 12, 8);
     try ui.label("Cipher", ui_mod.COLOR_TEXT);
     const clicked2 = try ui.button("OK");
@@ -146,7 +146,7 @@ test "ui: panel+label+button emit draw commands; button click hit-tests across f
     try std.testing.expect(clicked2);
 
     // Frame 3: mouse elsewhere -> not clicked.
-    try ui.begin(640, 400, 500, 350, true, true);
+    try ui.begin(640, 400, 500, 350, true, true, 1.0);
     try ui.panel(.{ .fixed = 300 }, .{ .fixed = 200 }, 12, 8);
     try ui.label("Cipher", ui_mod.COLOR_TEXT);
     const clicked3 = try ui.button("OK");

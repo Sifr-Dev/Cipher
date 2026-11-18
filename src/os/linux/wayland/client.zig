@@ -86,6 +86,7 @@ pub const Event = struct {
 /// are handed out starting at 2.
 pub const ObjectIds = struct {
     registry: ?u32 = null,
+    output: ?u32 = null,
     compositor: ?u32 = null,
     shm: ?u32 = null,
     seat: ?u32 = null,

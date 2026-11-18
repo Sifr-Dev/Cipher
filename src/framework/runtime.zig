@@ -25,6 +25,10 @@ pub const Options = struct {
     /// Their SFNT data must stay alive for the process lifetime; apps
     /// typically pass paths (the runtime reads them) rather than buffers.
     fallback_font_paths: []const []const u8 = &.{},
+    /// Integer buffer scale for HiDPI (1 = normal, 2 = 200%). Can be
+    /// overridden at startup with CIPHER_FORCE_SCALE=<n>. A compositor that
+    /// sends wl_output.scale changes the value dynamically (best effort).
+    scale: u32 = 1,
     ui_px: f32 = DEFAULT_UI_PX,
     width: u32 = DEFAULT_W,
     height: u32 = DEFAULT_H,
@@ -222,8 +226,10 @@ pub const Runtime = struct {
     data_device: ?u32 = null,
     data_source: ?u32 = null,
 
-    width: u32,
+    width: u32, // device pixels (logical * scale)
     height: u32,
+    scale: u32 = 1, // wl_buffer scale (compositor HiDPI factor, integer)
+    scale_pinned: bool = false, // CIPHER_FORCE_SCALE / Options.scale pins scale; wl_output is ignored then
     shm_buf: wayland.ShmBuffer,
 
     // GPU / UI
@@ -268,11 +274,25 @@ pub const Runtime = struct {
 
         var self: Runtime = @import("../core/types.zig").zeroed(Runtime);
         self.opts = opts;
+        // HiDPI scale: CIPHER_FORCE_SCALE beats Options.scale; integer clamp.
+        var scale: u32 = opts.scale;
+        var pinned = opts.scale != 1;
+        if (std.c.getenv("CIPHER_FORCE_SCALE")) |p| {
+            if (std.fmt.parseInt(u32, std.mem.span(p), 10)) |s| {
+                if (s >= 1 and s <= 8) {
+                    scale = s;
+                    pinned = true;
+                }
+            } else |_| {}
+        }
+        self.scale = scale;
+        self.scale_pinned = pinned;
+        std.debug.print("cipher: scale={d} (opts {d}x{d} -> {d}x{d} device px)\n", .{ scale, opts.width, opts.height, opts.width * scale, opts.height * scale });
         self.conn = try wayland.Connection.connect(runtime_dir, display);
         self.ids = .{};
-        self.width = opts.width;
-        self.height = opts.height;
-        self.shm_buf = try wayland.ShmBuffer.allocate(opts.width, opts.height);
+        self.width = opts.width * scale;
+        self.height = opts.height * scale;
+        self.shm_buf = try wayland.ShmBuffer.allocate(self.width, self.height);
         self.offer_mimes = .empty;
         self.pending_events = .empty;
         self.events_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -295,6 +315,8 @@ pub const Runtime = struct {
         var wm_base_g: ?u32 = null;
         var seat_g: ?u32 = null;
         var dm_g: ?u32 = null;
+        var output_g: ?u32 = null;
+        var output_v: u32 = 1;
         while (true) {
             var event = wayland.Event{};
             try self.conn.recv(&event);
@@ -312,6 +334,10 @@ pub const Runtime = struct {
                 if (std.mem.eql(u8, iface, "xdg_wm_base")) wm_base_g = name;
                 if (std.mem.eql(u8, iface, "wl_seat")) seat_g = name;
                 if (std.mem.eql(u8, iface, "wl_data_device_manager")) dm_g = name;
+                if (std.mem.eql(u8, iface, "wl_output")) {
+                    output_g = name;
+                    output_v = std.mem.readInt(u32, event.payload()[pos..][0..4], .little);
+                }
             }
             if (ids.sync_callback != null and event.sender == ids.sync_callback.? and event.opcode == 0) break;
         }
@@ -322,6 +348,16 @@ pub const Runtime = struct {
         self.g_dm = dm_g orelse return error.NoDataDeviceManager;
 
         // Bind globals.
+        if (output_g) |og| {
+            const oid = ids.new();
+            self.ids.output = oid;
+            cursor = wayland.Cursor{};
+            cursor.writeU32(og);
+            cursor.str("wl_output");
+            cursor.writeU32(@min(output_v, 4));
+            cursor.writeU32(oid);
+            try self.conn.send(ids.registry.?, 0, cursor.slice());
+        }
         inline for (.{ .{ "wl_compositor", 4, &self.g_compositor, &self.ids.compositor }, .{ "wl_shm", 1, &self.g_shm, &self.ids.shm }, .{ "xdg_wm_base", 6, &self.g_wm_base, &self.ids.wm_base }, .{ "wl_seat", 5, &self.g_seat, &self.ids.seat } }) |b| {
             const object_id = ids.new();
             cursor = wayland.Cursor{};
@@ -365,6 +401,11 @@ pub const Runtime = struct {
         cursor = wayland.Cursor{};
         cursor.str(opts.app_id);
         try self.conn.send(self.toplevel, 3, cursor.slice());
+        if (self.scale > 1) {
+            cursor = wayland.Cursor{};
+            cursor.writeI32(@intCast(self.scale));
+            try self.conn.send(self.surface, 8, cursor.slice()); // wl_surface.set_buffer_scale
+        }
         try self.conn.send(self.surface, 6, &.{}); // initial commit
 
         // Blocking wait for the first configure (socket still blocking).
@@ -390,7 +431,7 @@ pub const Runtime = struct {
         // Load font + atlas unconditionally; software rendering works without Vulkan.
         if (readFileAlloc(opts.font_path, std.heap.page_allocator)) |font_data| {
             self.font_data = font_data;
-            if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, opts.ui_px)) |a| {
+            if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, opts.ui_px * @as(f32, @floatFromInt(self.scale)))) |a| {
                 self.atlas = a;
                 for (opts.fallback_font_paths) |fb_path| {
                     const fb_data = readFileAlloc(fb_path, std.heap.page_allocator) catch continue;
@@ -444,6 +485,11 @@ pub const Runtime = struct {
     /// Handle the few events that can arrive during the initial blocking wait.
     fn dispatchInitEvent(self: *Runtime, event: *wayland.Event) !void {
         if (event.sender == wayland.WL_DISPLAY and event.opcode == 0) return error.ProtocolError;
+        if (self.ids.output != null and event.sender == self.ids.output.? and event.opcode == 3) {
+            const ns = event.readI32(0);
+            if (ns >= 1) self.applyScale(@intCast(ns)) catch {};
+            return;
+        }
         if (self.ids.seat != null and event.sender == self.ids.seat.? and event.opcode == 0) {
             try self.onSeatCapabilities(event.read32(0));
         }
@@ -476,6 +522,28 @@ pub const Runtime = struct {
             try self.conn.send(self.ids.linux_dmabuf.?, 0, cursor.slice()); // dm object id stored there
             self.data_device = dd;
         }
+    }
+
+    /// Change the HiDPI buffer scale at runtime (wl_output.scale). Reallocates
+    /// the shm buffer and GPU target at device resolution; layout, mouse
+    /// coordinates and damage are scaled accordingly from then on.
+    fn applyScale(self: *Runtime, ns: u32) !void {
+        if (ns < 1 or ns > 8) return;
+        if (self.scale_pinned) {
+            std.debug.print("cipher: wl_output.scale={d} ignored (pinned to {d}; unset CIPHER_FORCE_SCALE to follow the compositor)\n", .{ ns, self.scale });
+            return;
+        }
+        if (ns == self.scale) return;
+        const lw = self.width / self.scale;
+        const lh = self.height / self.scale;
+        self.scale = ns;
+        if (self.surface != 0) {
+            var cursor = wayland.Cursor{};
+            cursor.writeI32(@intCast(ns));
+            try self.conn.send(self.surface, 8, cursor.slice()); // wl_surface.set_buffer_scale
+        }
+        if (self.width != 0) try self.resize(lw * ns, lh * ns);
+        std.debug.print("cipher: wl_output.scale -> {d} ({d}x{d} device px)\n", .{ ns, lw * ns, lh * ns });
     }
 
     fn makeShmObjects(self: *Runtime) !void {
@@ -643,7 +711,7 @@ pub const Runtime = struct {
         }
         if (self.pointer != null and event.sender == self.pointer.?) {
             switch (event.opcode) {
-                2 => { // motion
+                2 => { // motion (logical coords; layout runs in logical px)
                     self.mouse_x = @floatCast(event.fixed24_8(1));
                     self.mouse_y = @floatCast(event.fixed24_8(2));
                     const ev = input.Event{ .mouse_move = .{ .x = self.mouse_x, .y = self.mouse_y } };
@@ -727,6 +795,13 @@ pub const Runtime = struct {
             }
             return;
         }
+        if (self.ids.output != null and event.sender == self.ids.output.? and event.opcode == 3) {
+            const ns = event.readI32(0);
+            if (ns >= 1) self.applyScale(@intCast(ns)) catch |e| {
+                std.debug.print("cipher: applyScale({d}) failed: {s}\n", .{ ns, @errorName(e) });
+            };
+            return;
+        }
         if (event.sender == self.xdg_surface) {
             if (event.opcode == 0) { // configure
                 const serial = event.read32(0);
@@ -738,12 +813,13 @@ pub const Runtime = struct {
         }
         if (event.sender == self.toplevel) {
             switch (event.opcode) {
-                0 => { // configure w,h,states
+                0 => { // configure w,h,states (logical); buffer is scaled
                     const w = event.readI32(0);
                     const h = event.readI32(1);
-                    if (w > 0 and h > 0 and (@as(u32, @intCast(w)) != self.width or @as(u32, @intCast(h)) != self.height)) {
-                        const nw: u32 = @intCast(w);
-                        const nh: u32 = @intCast(h);
+                    if (w > 0 and h > 0) {
+                        const nw: u32 = @as(u32, @intCast(w)) * self.scale;
+                        const nh: u32 = @as(u32, @intCast(h)) * self.scale;
+                        if (nw == self.width and nh == self.height) return;
                         self.resize(nw, nh) catch |e| {
                             std.debug.print("cipher: resize failed: {s}\n", .{@errorName(e)});
                         };
@@ -860,7 +936,7 @@ pub const Runtime = struct {
         if (self.ui_state != null) {
             var u = &self.ui_state.?;
             u.events = self.pending_events.items; // before begin(): begin() reads events for focus semantics
-            u.begin(@floatFromInt(self.width), @floatFromInt(self.height), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed) catch |e| {
+                        u.begin(@floatFromInt(self.width / self.scale), @floatFromInt(self.height / self.scale), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed, @floatFromInt(self.scale)) catch |e| {
                 if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: ui.begin error: {s}\n", .{@errorName(e)});
                 self.ui_state = null;
             };
@@ -936,8 +1012,8 @@ pub const Runtime = struct {
         cursor = wayland.Cursor{};
         cursor.writeI32(0);
         cursor.writeI32(0);
-        cursor.writeI32(@intCast(self.width));
-        cursor.writeI32(@intCast(self.height));
+        cursor.writeI32(@intCast(self.width / self.scale));
+        cursor.writeI32(@intCast(self.height / self.scale));
         try self.conn.send(self.surface, 2, cursor.slice());
         try self.conn.send(self.surface, 6, &.{});
 

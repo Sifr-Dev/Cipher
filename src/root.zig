@@ -344,7 +344,7 @@ pub const Application = struct {
                 var clicks_buf: [40]u8 = undefined;
                 const clicks_str = std.fmt.bufPrint(&clicks_buf, "Clicks: {d}", .{clicks}) catch "Clicks: ?";
                 var u = &ui.?;
-                u.begin(@floatFromInt(width), @floatFromInt(height), mouse_x, mouse_y, mouse_down, mouse_pressed) catch {
+                u.begin(@floatFromInt(width), @floatFromInt(height), mouse_x, mouse_y, mouse_down, mouse_pressed, 1.0) catch {
                     ui = null;
                     continue;
                 };
