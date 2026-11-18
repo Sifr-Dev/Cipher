@@ -6,7 +6,22 @@ const device = @import("gpu/vulkan/device.zig");
 const text = @import("gpu/vulkan/text.zig");
 const atlas_mod = @import("ui/text/atlas.zig");
 
-const FONT_PATH = "/usr/share/fonts/liberation/LiberationSans-Regular.ttf";
+fn findFont(comptime candidates: []const []const u8) ?[]const u8 {
+    for (candidates) |p| {
+        const fd = std.posix.openat(std.posix.AT.FDCWD, p, .{ .ACCMODE = .RDONLY }, 0) catch continue;
+        _ = std.c.close(fd);
+        return p;
+    }
+    return null;
+}
+const LIBERATION_CANDIDATES = [_][]const u8{
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+};
+fn fontPath() ?[]const u8 {
+    return findFont(&LIBERATION_CANDIDATES);
+}
 
 fn readFile(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
     const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0);
@@ -22,7 +37,11 @@ fn readFile(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
 }
 
 test "GPU text: atlas upload + glyph quad renders exact pixels" {
-    const data = try readFile(FONT_PATH, std.testing.allocator);
+    const fpath = fontPath() orelse {
+        std.debug.print("GPU_SKIP gpu_text: LiberationSans not on disk\n", .{});
+        return;
+    };
+    const data = try readFile(fpath, std.testing.allocator);
     defer std.testing.allocator.free(data);
 
     // CPU atlas at 64px, glyph 'A'.
@@ -65,9 +84,15 @@ test "GPU text: atlas upload + glyph quad renders exact pixels" {
     std.debug.print("TEXT_GPU_TEXELS solid=({d},{d}) hole=({d},{d}) glyph={d}x{d} zeros={d}\n", .{ sp[0], sp[1], hp[0], hp[1], g.w, g.h, zeros });
 
     // GPU pipeline.
-    var vk = try device.load();
+    var vk = device.load() catch |e| {
+        std.debug.print("GPU_SKIP gpu_text: {s}\n", .{@errorName(e)});
+        return;
+    };
     var dev: device.Device = .{};
-    try device.createDevice(&vk, &dev);
+    device.createDevice(&vk, &dev) catch |e| {
+        std.debug.print("GPU_SKIP gpu_text: createDevice {s}\n", .{@errorName(e)});
+        return;
+    };
 
     const W: u32 = 160;
     const H: u32 = 96;
