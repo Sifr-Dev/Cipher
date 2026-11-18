@@ -94,19 +94,40 @@ framework as a path dependency — exactly how an app is built on Qt.
 
 ## speed & footprint vs toolkits (2026-11-17)
 
-minimal hello window, 120 frames, umbriel/NVIDIA — see `sifr-apps/bench/BENCH.md`:
+minimal hello window, 120 frames, umbriel/NVIDIA — full data in `sifr-apps/bench/BENCH.md`:
 
-| | cipher | gtk4 | qt6 |
+| | cipher (ReleaseSafe stripped) | gtk4 | qt6 |
 | --- | --- | --- | --- |
-| linked .so mapppings | **4** | 113 | 45 |
-| wall ms (process exec) | 2344–2386 | 2239–2277 | 1961–1962 |
-| peak RSS | 286 MB | 300–326 MB | 47–48 MB |
+| linked .so mappings | **3** | 113 | 45 |
+| wall ms (process exec) | **854–999** | 2095–2104 | 1936–1966 |
+| peak RSS | **23.4 MB (software path)** / ~270–325 MB (Vulkan) | ~294 MB | ~39–49 MB |
+| heavy scene (CPU ms/frame) | **0.030–0.035** | not run | 0.925–0.950 |
 
-Cipher is the only one of the three with zero toolkit dependencies; Vulkan
-dlopen means the GPU ABI is never a link-time constraint. RSS is dominated by
-the NVIDIA Vulkan allocator floor, not by this framework (~20 MB above it).
-ReleaseFast Vulkan path is currently unstable on NVIDIA (tracked); debug is
-the verified path.
+Cipher is the only one of the three with zero toolkit dependencies; Wayland
+and Vulkan are dlopen'd, never linked — and in software mode nothing is
+needed at all. GPU RSS is dominated by the NVIDIA Vulkan allocator floor,
+not by this framework.
 
-## license
+See **where Qt and GTK still lead** below for the honest ledger.
+
+## where Qt and GTK still lead (2026-11-18)
+
+This framework is young and deliberately narrow. Honest ledger vs Qt6/GTK4:
+
+**Qt/GTK win unconditionally today:** AT-SPI accessibility (screen readers),
+input method editor (IME) integration, text shaping, widget breadth
+(thousands of controls vs our ~15), theming, printing, internationalization,
+tooling, stable ABI/API, and decades of battle-testing. Our HiDPI integer
+scale works; fractional-scale protocol path was blocked by the umbriel
+compositor killing the client on session-object creation (documented).
+**We win today on:** startup (0.854s vs Qt 1.94–1.97s, GTK 2.10s),
+per-frame CPU in our heavy scene (0.030–0.035ms vs Qt 0.925–0.950ms),
+zero toolkit runtime dependencies (3 mappings vs 45/113), and 23.4 MB
+software-shm RSS (vs Qt 38.6–40.4 MB). Software rendering path exists —
+GPU-optional. Nothing here is a universal claim: our wins are measured
+in specific scenes and measured honestly. If you need accessibility,
+IME, or rich widget tooling today, use Qt or GTK; when you need a small,
+fast, self-contained native binary and you control the whole stack,
+Cipher is the pick.
+
 `MIT` — see `LICENSE`. built from zero.

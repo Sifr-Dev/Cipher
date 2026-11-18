@@ -63,12 +63,15 @@ pub const Ui = struct {
     // Text input focus snapshot (used by the IME/text-input protocol path).
     // Captured at the end of the textInput widget each frame when focused.
 
+    pub const MenuState = struct { open: bool = false, x: f32 = 0, y: f32 = 0, sel: i32 = 0 };
+
     pub const WidgetState = union(enum) {
         slider: f32,
         checkbox: bool,
         list: struct { scroll: f32 = 0, sel: i32 = -1 },
         text: struct { buf: [4096]u8 = undefined, len: usize = 0, cursor: usize = 0 },
         tabs: i32,
+        menu: MenuState,
         none: void,
     };
 

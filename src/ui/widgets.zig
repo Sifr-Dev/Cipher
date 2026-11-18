@@ -320,3 +320,101 @@ pub fn progress(ui: *ui_mod.Ui, w: f32, frac: f32) !void {
         try ui.addRect(.{ .x = prev.x, .y = prev.y, .w = prev.w * f, .h = prev.h }, C.COLOR_BUTTON_ACTIVE);
     }
 }
+
+pub const MenuItem = struct { label: []const u8, disabled: bool = false };
+
+/// Right-click context menu, declared LAST so it paints above everything.
+/// Opens on BTN_RIGHT inside `anchor`; arrow keys move selection, Enter
+/// activates, Esc closes, click outside closes. Returns the activated item
+/// index this frame, or null.
+pub fn contextMenu(ui: *ui_mod.Ui, anchor: layout.Rect, items: []const MenuItem) !?usize {
+    const BTN_RIGHT: u32 = 0x111;
+    const PAD_X: f32 = 12;
+    const ITEM_H: f32 = lineH(ui) + 8;
+    if (items.len == 0) return null;
+
+    const id = ui.next_id;
+    ui.next_id += 1;
+    const st = try ui.wstate(id, .{ .menu = .{} });
+    const n = try ui.newNode();
+    n.id = id;
+    n.kind = .none;
+    n.w = .{ .fixed = 0 };
+    n.h = .{ .fixed = 0 };
+    try ui.current().addChild(ui.allocator(), n);
+
+    // right-click inside anchor opens at cursor
+    for (ui.events) |e| switch (e) {
+        .mouse_button => |b| {
+            if (b.button == BTN_RIGHT and b.pressed and anchor.contains(ui.mouse_x, ui.mouse_y)) {
+                st.menu.open = true;
+                st.menu.x = ui.mouse_x;
+                st.menu.y = ui.mouse_y;
+                st.menu.sel = 0;
+            }
+        },
+        else => {},
+    };
+    if (!st.menu.open) return null;
+
+    // measure the widest label for panel sizing
+    var menu_w: f32 = 64;
+    for (items) |it| {
+        const w = (ui.atlas.measure(it.label) catch 0) / ui.scale + 2 * PAD_X;
+        if (w > menu_w) menu_w = w;
+    }
+    const menu_h: f32 = 2 + @as(f32, @floatFromInt(items.len)) * ITEM_H + 2;
+
+    // keyboard navigation while open
+    var activated: ?usize = null;
+    for (ui.events) |e| switch (e) {
+        .key => |k| {
+            if (!k.pressed) continue;
+            switch (k.key) {
+                .up => st.menu.sel = if (st.menu.sel > 0) st.menu.sel - 1 else @intCast(items.len - 1),
+                .down => st.menu.sel = if (st.menu.sel + 1 < @as(i32, @intCast(items.len))) st.menu.sel + 1 else 0,
+                .enter, .keypad_enter, .space => {
+                    const i: usize = @intCast(st.menu.sel);
+                    if (i < items.len and !items[i].disabled) {
+                        activated = i;
+                        st.menu.open = false;
+                    }
+                },
+                .esc => st.menu.open = false,
+                else => {},
+            }
+        },
+        else => {},
+    };
+
+    // click rows (and handle click outside -> close)
+    const panel = layout.Rect{ .x = st.menu.x, .y = st.menu.y, .w = menu_w, .h = menu_h };
+    for (items, 0..) |it, i| {
+        if (it.disabled) continue;
+        const r = layout.Rect{ .x = panel.x + 1, .y = panel.y + 1 + @as(f32, @floatFromInt(i)) * ITEM_H, .w = panel.w - 2, .h = ITEM_H };
+        if (ui.mouse_pressed and r.contains(ui.mouse_x, ui.mouse_y)) {
+            activated = i;
+            st.menu.open = false;
+        }
+    }
+    if (ui.mouse_pressed and !panel.contains(ui.mouse_x, ui.mouse_y)) st.menu.open = false;
+    if (!st.menu.open) return activated;
+
+    // paint: panel + hairline border + rows with hover/sel highlight
+    try ui.addRect(panel, C.COLOR_PANEL);
+    try ui.addRect(.{ .x = panel.x, .y = panel.y, .w = panel.w, .h = 1 }, C.COLOR_FOCUS_RING);
+    try ui.addRect(.{ .x = panel.x, .y = panel.y + panel.h - 1, .w = panel.w, .h = 1 }, C.COLOR_FOCUS_RING);
+    try ui.addRect(.{ .x = panel.x, .y = panel.y, .w = 1, .h = panel.h }, C.COLOR_FOCUS_RING);
+    try ui.addRect(.{ .x = panel.x + panel.w - 1, .y = panel.y, .w = 1, .h = panel.h }, C.COLOR_FOCUS_RING);
+    for (items, 0..) |it, i| {
+        const r = layout.Rect{ .x = panel.x + 2, .y = panel.y + 2 + @as(f32, @floatFromInt(i)) * ITEM_H, .w = panel.w - 4, .h = ITEM_H };
+        const hovered = r.contains(ui.mouse_x, ui.mouse_y);
+        if (hovered or st.menu.sel == @as(i32, @intCast(i))) {
+            try ui.addRect(r, C.COLOR_BUTTON_HOT);
+        }
+        if (hovered) st.menu.sel = @intCast(i);
+        const tcol: u32 = if (it.disabled) C.COLOR_TEXT_DIM else C.COLOR_TEXT;
+        try ui.addText(r.x + PAD_X, r.y + r.h - 4, it.label, tcol);
+    }
+    return activated;
+}

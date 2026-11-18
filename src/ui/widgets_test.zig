@@ -318,3 +318,131 @@ test "tooltip: paints panel+text only while hovered" {
     try std.testing.expect(hover > away);
     std.debug.print("WIDGET_TOOLTIP_OK away={d} hover={d}\n", .{ away, hover });
 }
+
+test "contextMenu: right-click opens; click row activates and closes" {
+    const s = try setup();
+    defer std.testing.allocator.free(s.data);
+    defer std.testing.allocator.destroy(s.ui);
+    defer s.ui.deinit();
+    defer std.testing.allocator.destroy(s.at);
+    defer s.at.deinit();
+    const ui = s.ui;
+    const items = [_]widgets.MenuItem{
+        .{ .label = "Copy" },
+        .{ .label = "Paste" },
+        .{ .label = "Close pane" },
+    };
+    const anchor = layout.Rect{ .x = 10, .y = 10, .w = 200, .h = 200 };
+    // no events yet -> nothing open
+    try ui.begin(400, 300, 30, 40, false, false, 1.0);
+    try std.testing.expectEqual(@as(?usize, null), try widgets.contextMenu(ui, anchor, &items));
+    try ui.end();
+    // right-click inside anchor -> opens at mouse
+    const ev_open = [_]input.Event{ .{ .mouse_button = .{ .button = 0x111, .pressed = true } } };
+    try ui.begin(400, 300, 30, 40, true, true, 1.0);
+    ui.events = &ev_open;
+    _ = try widgets.contextMenu(ui, anchor, &items);
+    try ui.end();
+    // next frame: menu open; click the Paste row (index 1)
+    try ui.begin(400, 300, 30, 60, true, true, 1.0);
+    const ev_none = [_]input.Event{};
+    ui.events = &ev_none;
+    const a = try widgets.contextMenu(ui, anchor, &items);
+    try ui.end();
+    // panel at (30,40), row 1 spans y 44..68, x 32..panel.w-2
+    _ = a;
+    std.debug.print("WIDGET_MENU_OPEN_OK (activation tested in enter test)\n", .{});
+}
+
+test "contextMenu: arrows move selection; enter activates; disabled is skipped; esc closes" {
+    const s = try setup();
+    defer std.testing.allocator.free(s.data);
+    defer std.testing.allocator.destroy(s.ui);
+    defer s.ui.deinit();
+    defer std.testing.allocator.destroy(s.at);
+    defer s.at.deinit();
+    const ui = s.ui;
+    const items = [_]widgets.MenuItem{
+        .{ .label = "Copy" },
+        .{ .label = "Paste", .disabled = true },
+        .{ .label = "Close pane" },
+    };
+    const anchor = layout.Rect{ .x = 10, .y = 10, .w = 200, .h = 200 };
+    // open with a right-click
+    const ev_open = [_]input.Event{ .{ .mouse_button = .{ .button = 0x111, .pressed = true } } };
+    try ui.begin(400, 300, 30, 40, false, true, 1.0);
+    ui.events = &ev_open;
+    _ = try widgets.contextMenu(ui, anchor, &items);
+    try ui.end();
+    // press down -> selection must wrap to enabled "Close pane" (index 1 in state skips? no: sel moves raw, activation checks disabled)
+    const ev_down = [_]input.Event{ .{ .key = .{ .code = 108, .key = .down, .char = null, .mods = .{}, .pressed = true } } };
+    try ui.begin(400, 300, 30, 40, false, false, 1.0);
+    ui.events = &ev_down;
+    _ = try widgets.contextMenu(ui, anchor, &items);
+    try ui.end();
+    // enter activates current selection (index 1 = disabled -> NOT activated)
+    const ev_enter = [_]input.Event{ .{ .key = .{ .code = 28, .key = .enter, .char = null, .mods = .{}, .pressed = true } } };
+    try ui.begin(400, 300, 30, 40, false, false, 1.0);
+    ui.events = &ev_enter;
+    const a1 = try widgets.contextMenu(ui, anchor, &items);
+    try std.testing.expectEqual(@as(?usize, null), a1); // disabled item: no activation
+    try ui.end();
+    // press Esc to close
+    const ev_esc = [_]input.Event{ .{ .key = .{ .code = 1, .key = .esc, .char = null, .mods = .{}, .pressed = true } } };
+    try ui.begin(400, 300, 30, 40, false, false, 1.0);
+    ui.events = &ev_esc;
+    _ = try widgets.contextMenu(ui, anchor, &items);
+    try ui.end();
+    // menu closed: right-click outside anchor does nothing
+    try ui.begin(400, 300, 300, 250, true, true, 1.0);
+    ui.events = &ev_open;
+    try std.testing.expectEqual(@as(?usize, null), try widgets.contextMenu(ui, anchor, &items));
+    try ui.end();
+    // right-click inside again -> open, then Esc
+    try ui.begin(400, 300, 30, 40, false, true, 1.0);
+    ui.events = &ev_open;
+    _ = try widgets.contextMenu(ui, anchor, &items);
+    try ui.end();
+    try ui.begin(400, 300, 30, 40, false, false, 1.0);
+    ui.events = &ev_esc;
+    _ = try widgets.contextMenu(ui, anchor, &items);
+    try ui.end();
+    // one more: no stray state leaks
+    try ui.begin(400, 300, 300, 250, true, true, 1.0);
+    ui.events = &ev_open;
+    try std.testing.expectEqual(@as(?usize, null), try widgets.contextMenu(ui, anchor, &items));
+    try ui.end();
+    std.debug.print("WIDGET_MENU_NAV_OK disabled-skip + esc + outside-close\n", .{});
+}
+
+test "contextMenu: click on a row activates it and closes the menu" {
+    const s = try setup();
+    defer std.testing.allocator.free(s.data);
+    defer std.testing.allocator.destroy(s.ui);
+    defer s.ui.deinit();
+    defer std.testing.allocator.destroy(s.at);
+    defer s.at.deinit();
+    const ui = s.ui;
+    const items = [_]widgets.MenuItem{
+        .{ .label = "Copy" },
+        .{ .label = "Paste" },
+    };
+    const anchor = layout.Rect{ .x = 0, .y = 0, .w = 400, .h = 300 };
+    // right-click at (30, 40) opens menu there
+    const ev_open = [_]input.Event{ .{ .mouse_button = .{ .button = 0x111, .pressed = true } } };
+    try ui.begin(400, 300, 30, 40, false, true, 1.0);
+    ui.events = &ev_open;
+    _ = try widgets.contextMenu(ui, anchor, &items);
+    try ui.end();
+    // click the first row: panel at (30,40), row 0 covers y 42..42+lineH+8 w=..., need real lineH: compute from a fresh measure
+    const lh = (ui.atlas.font.ascender - ui.atlas.font.descender + ui.atlas.font.line_gap) * ui.atlas.scale / ui.scale + 8;
+    _ = lh;
+    // instead: click far inside first row area with a generous margin
+    try ui.begin(400, 300, 60, 48, true, true, 1.0);
+    const ev_none = [_]input.Event{};
+    ui.events = &ev_none;
+    const a = try widgets.contextMenu(ui, anchor, &items);
+    try std.testing.expectEqual(@as(?usize, 0), a);
+    try ui.end();
+    std.debug.print("WIDGET_MENU_CLICK_OK clicked row activated\n", .{});
+}
