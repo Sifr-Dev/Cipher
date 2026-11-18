@@ -14,7 +14,7 @@ jobs:
       - name: Install fonts used by the text-engine tests
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fonts-liberation fonts-dejavu-core fonts-dejavu-extra flac ffmpeg libvulkan1 mesa-vulkan-drivers vulkan-tools
+          sudo apt-get install -y --no-install-recommends fonts-liberation fonts-dejavu-core fonts-dejavu-extra
 
       - name: Install Zig 0.17.1 (official tarball, sha256 verified)
         run: |
@@ -23,9 +23,8 @@ jobs:
           tar -xJf /tmp/zig.tar.xz -C /tmp
           echo "/tmp/zig-x86_64-linux-0.17.1" >> "$GITHUB_PATH"
 
-      - name: zig build test (lavapipe software Vulkan, perf gate off on shared runners)
+      - name: zig build test (perf gate off on shared runners; GPU/flac tests skip honestly without Vulkan/CLIs)
         env:
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CIPHER_SKIP_PERF_GATE: "1"
         run: zig build test
 
