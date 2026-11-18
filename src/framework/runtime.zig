@@ -237,7 +237,7 @@ pub const Runtime = struct {
     dev: device.Device = undefined,
     vk_loaded: bool = false,
     gt: ?text_gpu.GpuText = null,
-    atlas: ?atlas_mod.TextAtlas = null,
+    atlas: ?*atlas_mod.TextAtlas = null, // heap-boxed: Ui holds a pointer; Runtime is moved by value
     ui_state: ?ui_mod.Ui = null,
     font_data: ?[]u8 = null,
     quads_buf: []text_gpu.Quad,
@@ -432,7 +432,9 @@ pub const Runtime = struct {
         if (readFileAlloc(opts.font_path, std.heap.page_allocator)) |font_data| {
             self.font_data = font_data;
             if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, opts.ui_px * @as(f32, @floatFromInt(self.scale)))) |a| {
-                self.atlas = a;
+                const boxed = try std.heap.page_allocator.create(atlas_mod.TextAtlas);
+                boxed.* = a;
+                self.atlas = boxed;
                 for (opts.fallback_font_paths) |fb_path| {
                     const fb_data = readFileAlloc(fb_path, std.heap.page_allocator) catch continue;
                     self.atlas.?.addFallback(fb_data) catch continue;
@@ -441,7 +443,7 @@ pub const Runtime = struct {
                 self.atlas.?.bake(160, 255) catch {};
                 // UI state is created now regardless of GPU path so the
                 // software-shm fallback can render the UI on CPU.
-                self.ui_state = ui_mod.Ui.init(std.heap.page_allocator, &self.atlas.?);
+                self.ui_state = ui_mod.Ui.init(std.heap.page_allocator, self.atlas.?);
                 // Optional GPU path
                 if (!force_sw) if (device.load()) |v| {
                     self.vk = v;
@@ -578,7 +580,10 @@ pub const Runtime = struct {
         if (self.surface != 0) _ = self.conn.send(self.surface, 0, &.{}) catch {};
         if (self.ui_state) |*u| u.deinit();
         if (self.gt) |*g| g.deinitSoft(&self.vk, &self.dev);
-        if (self.atlas) |*a| a.deinit();
+        if (self.atlas) |a| {
+            a.deinit();
+            std.heap.page_allocator.destroy(a);
+        }
         self.shm_buf.deinit();
         for (self.offer_mimes.items) |m| std.heap.page_allocator.free(m);
         self.offer_mimes.deinit(std.heap.page_allocator);
@@ -612,7 +617,7 @@ pub const Runtime = struct {
         // Only re-create the GPU text pipeline when a Vulkan device exists;
         // in software mode self.vk/self.dev are never initialized.
         if (self.vk_loaded) {
-            if (self.atlas) |*a| {
+            if (self.atlas) |a| {
                 if (text_gpu.GpuText.init(&self.vk, &self.dev, w, h, a.atlas_w, a.atlas_h)) |g| {
                     self.gt = g;
                     self.gt.?.uploadAtlas(&self.vk, &self.dev, a.atlas) catch {};
@@ -942,7 +947,7 @@ pub const Runtime = struct {
             };
             if (self.ui_state != null) {
                 // Re-upload the atlas if a glyph was rasterized since the last upload
-                if (self.atlas) |*a| {
+                if (self.atlas) |a| {
                     if (a.dirty) {
                         if (self.gt) |*g| {
                             g.uploadAtlas(&self.vk, &self.dev, a.atlas) catch {};
@@ -972,7 +977,7 @@ pub const Runtime = struct {
                         n = eq_len;
                     }
                     self.extra_quads = null; // one frame only
-                    n = buildQuads(&self.atlas.?, u.drawCmds(), self.quads_buf, eq_len) catch |e| blk: {
+                    n = buildQuads(self.atlas.?, u.drawCmds(), self.quads_buf, eq_len) catch |e| blk: {
                         if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: buildQuads error: {s}\n", .{@errorName(e)});
                         break :blk eq_len;
                     };
