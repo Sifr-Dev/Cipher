@@ -31,6 +31,26 @@ scope that follows. It contains:
 | RSS, GPU app (debug build) | ~270 MB (debug symbols dominate) | `JANUS_EXIT rss_kb=` |
 | accessibility (AT-SPI2) | **none** — deferred per owner | — |
 
+### Measured on this machine (2026-11-19, nanoui hillclimb, unmodified)
+
+CPU-raster scenes (their Linux path without Metal), MY host:
+
+| scene | nanoui frame CPU (median) | build | layout | paint |
+|---|---:|---:|---:|---:|
+| text (300 changing labels) | 0.374 ms | 0.042 ms | 0.121 ms | 0.181 ms |
+| boxes (600 shadowed boxes) | 0.238 ms | 0.074 ms | 0.051 ms | 0.085 ms |
+| dashboard (12 cards) | 0.104 ms | 0.015 ms | 0.023 ms | 0.057 ms |
+
+Caveats recorded honestly: no GPU timestamps on this path (their Metal numbers
+are theirs, not ours); encode CPU on the CPU raster is 4–75 ms (that is the real
+cost of the shadow/blend rasterizer in software, not of frame logic); our
+Cipher comparison does **not exist yet** — there is no Cipher hillclimb
+harness, so any "we are faster" claim today would be fabrication. Their
+CPU-frame numbers reproduce on our hardware; our verdict in §4 therefore rests
+on *scope/depth judgment*, not on measured head-to-head speed. Until D8/D9
+lands, treat every comparative speed claim as provisional. Encode/render-path
+differences (GTK+EGL vs direct WSI) are unmeasured in both directions.
+
 Reading: the hardest layers are done and verified. The gaps are almost all
 *breadth* (product surface) and a handful of strategic *depth* moves (§6–§7).
 
