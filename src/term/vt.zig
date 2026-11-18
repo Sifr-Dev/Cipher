@@ -15,6 +15,7 @@ pub const Parser = struct {
     csi_params: [16]i32 = std.mem.zeroes([16]i32),
     csi_nparams: usize = 0,
     csi_private: u8 = 0, // '?' or other private marker
+    csi_dollar: bool = false, // '$' intermediary — DECRQM/DECRPM zone
     osc_buf: [8192]u8 = undefined,
     osc_len: usize = 0,
     osc_is_7501: bool = false,
@@ -23,6 +24,13 @@ pub const Parser = struct {
     utf8_buf: [4]u8 = undefined,
     utf8_len: usize = 0,
     utf8_need: usize = 0,
+    /// Set when the child asks "CSI ? u" (kitty kbd query). The app polls
+    /// this after feeding and must answer "CSI ? <flags> u".
+    kbd_query: bool = false,
+    /// Set when the child asks "CSI ? 2026 $ p" (DECRQM for mode 2026).
+    mode_2026_query: bool = false,
+
+    pub const State = enum { ground, esc, csi, osc, osc_esc, charset };
 
     /// Last OSC 7501 payload seen (agent status), for apps that care.
     pub var last_osc_7501: [256]u8 = undefined;
@@ -30,7 +38,6 @@ pub const Parser = struct {
     pub var last_title: [256]u8 = undefined;
     pub var last_title_len: usize = 0;
 
-    pub const State = enum { ground, esc, csi, osc, osc_esc, charset };
 
     pub fn feed(self: *Parser, g: *Grid, bytes: []const u8) !void {
         for (bytes) |b| try self.byte(g, b);
@@ -119,6 +126,7 @@ pub const Parser = struct {
                 self.csi_nparams = 0;
                 self.csi_params = std.mem.zeroes([16]i32);
                 self.csi_private = 0;
+                self.csi_dollar = false;
             },
             ']' => {
                 self.state = .osc;
@@ -148,6 +156,9 @@ pub const Parser = struct {
                 self.state = .ground;
             },
             'c' => { // RIS full reset
+                g.kbd_flags = 0;
+                g.kbd_stack_len = 0;
+                g.sync_output = false;
                 try g.reset();
                 self.state = .ground;
             },
@@ -166,8 +177,13 @@ pub const Parser = struct {
     }
 
     fn csi(self: *Parser, g: *Grid, b: u8) !void {
-        if (b == '?' or b == '>' or b == '!' or b == ' ') {
+        if (b == '?' or b == '>' or b == '!' or b == ' ' or b == '<' or b == '=') {
             if (self.csi_nparams == 0 and self.csi_private == 0) self.csi_private = b;
+            return;
+        }
+        if (b == '$' and self.csi_private == '?') {
+            // DECRQM/DECRPM intermediary — e.g. CSI ? 2026 $ p
+            self.csi_dollar = true;
             return;
         }
         if (b >= '0' and b <= '9') {
@@ -189,7 +205,21 @@ pub const Parser = struct {
         const priv = self.csi_private;
         self.csi_private = 0;
         if (priv == '?') {
+            if (self.csi_dollar and final == 'p') {
+                const mode = if (self.csi_nparams >= 1) self.csi_params[0] else 0;
+                if (mode == 2026) self.mode_2026_query = true;
+                self.csi_dollar = false;
+                return;
+            }
+            if (final == 'u') {
+                self.kbd_query = true; // kitty progressive-enhancement query
+                return;
+            }
             try self.csiPrivateMode(g, final);
+            return;
+        }
+        if (priv == '=' or priv == '>' or priv == '<') {
+            self.csiKbdFlags(g, priv, final);
             return;
         }
         try self.csiDispatch(g, final);
@@ -206,8 +236,29 @@ pub const Parser = struct {
                     if (on) try g.enterAltScreen() else g.leaveAltScreen();
                 },
                 1000, 1002, 1003, 1006 => {}, // mouse modes: parsed, ignored
+                2026 => g.setSyncOutput(on), // synchronized output (BSU/ESU)
                 else => {},
             }
+        }
+    }
+
+    fn csiKbdFlags(self: *Parser, g: *Grid, priv: u8, final: u8) void {
+        if (final != 'u') return;
+        switch (priv) {
+            '=' => { // CSI = flags [; mode] u — set progressive enhancement flags
+                const flags = self.csi_params[0];
+                const mode = if (self.csi_nparams >= 2) self.csi_params[1] else 1;
+                g.setKbdFlags(flags, mode);
+            },
+            '>' => { // CSI > flags u (flags default 0) — push and set
+                const flags = if (self.csi_nparams >= 1) self.csi_params[0] else 0;
+                g.pushKbdFlags(flags);
+            },
+            '<' => { // CSI < n u (n default 1) — pop
+                const n = if (self.csi_nparams >= 1) self.csi_params[0] else 1;
+                g.popKbdFlags(n);
+            },
+            else => {},
         }
     }
 
