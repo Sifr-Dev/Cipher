@@ -60,6 +60,8 @@ pub const Ui = struct {
     // (keyboard semantics), never after mouse use. Matches toolkit focus-visible.
     kb_visible: bool = false,
     scale: f32 = 1, // HiDPI: layout runs in logical px; emission multiplies by scale
+    // Text input focus snapshot (used by the IME/text-input protocol path).
+    // Captured at the end of the textInput widget each frame when focused.
 
     pub const WidgetState = union(enum) {
         slider: f32,

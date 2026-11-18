@@ -10,6 +10,7 @@ const device = @import("../gpu/vulkan/device.zig");
 const text_gpu = @import("../gpu/vulkan/text.zig");
 const atlas_mod = @import("../ui/text/atlas.zig");
 const ui_mod = @import("../ui/ui.zig");
+const layout_mod = @import("../ui/layout.zig");
 const input = @import("input.zig");
 
 pub const DEFAULT_FONT = "/usr/share/fonts/liberation/LiberationSans-Regular.ttf";
@@ -455,7 +456,9 @@ pub const Runtime = struct {
             try self.dispatchInitEvent(&event);
         }
 
-        // Shm pool + buffer at initial size.
+        // Text input object: created after the first frame commit (steady state),
+        // not during the configure burst — umbriel kills the connection when
+        // clients register objects during its configure sequence.
         try self.makeShmObjects();
 
         // GPU + font + UI (all optional; software fallback presents clear color).
@@ -737,10 +740,12 @@ pub const Runtime = struct {
                 },
                 1 => {
                     self.focused = true;
+                    if (std.c.getenv("CIPHER_DEBUG_FOCUS") != null) std.debug.print("cipher: keyboard enter (focused)\n", .{});
                     app.onEvent(app.ptr, self, .{ .focus = true });
                 },
                 2 => {
                     self.focused = false;
+                    if (std.c.getenv("CIPHER_DEBUG_FOCUS") != null) std.debug.print("cipher: keyboard leave (unfocused)\n", .{});
                     app.onEvent(app.ptr, self, .{ .focus = false });
                 },
                 3 => { // key
