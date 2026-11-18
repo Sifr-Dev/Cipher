@@ -43,13 +43,13 @@ CPU-raster scenes (their Linux path without Metal), MY host:
 
 Caveats recorded honestly: no GPU timestamps on this path (their Metal numbers
 are theirs, not ours); encode CPU on the CPU raster is 4–75 ms (that is the real
-cost of the shadow/blend rasterizer in software, not of frame logic); our
-Cipher comparison does **not exist yet** — there is no Cipher hillclimb
-harness, so any "we are faster" claim today would be fabrication. Their
-CPU-frame numbers reproduce on our hardware; our verdict in §4 therefore rests
-on *scope/depth judgment*, not on measured head-to-head speed. Until D8/D9
-lands, treat every comparative speed claim as provisional. Encode/render-path
-differences (GTK+EGL vs direct WSI) are unmeasured in both directions.
+cost of the shadow/blend rasterizer in software, not of frame logic); their
+CPU-frame numbers reproduce on our hardware. **Update (2026-11-19):** the
+Cipher harness now exists (see framework/cipher-bench work, docs/BENCH.md) —
+CPU phases measured on this host (text 0.166 / boxes 0.146 / dashboard 0.065 ms
+build+layout+encode vs nanoui's 0.374 / 0.238 / 0.104 ms), with the scene
+asymmetries and unmeasured present-path caveats written into BENCH.md. The
+render/present comparison remains unmeasured; nothing here claims GPU parity.
 
 Reading: the hardest layers are done and verified. The gaps are almost all
 *breadth* (product surface) and a handful of strategic *depth* moves (§6–§7).
