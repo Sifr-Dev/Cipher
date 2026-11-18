@@ -282,6 +282,13 @@ pub const Runtime = struct {
     events_arena: std.heap.ArenaAllocator,
     app_ref: ?*const App = null,
 
+    timing_init: bool = false,
+    timing_on: bool = false,
+    timing_count: u64 = 0,
+    t_build_ns: u64 = 0,
+    t_layout_ns: u64 = 0,
+    t_encode_ns: u64 = 0,
+    t_render_ns: u64 = 0,
     pub fn init(opts: Options) !Runtime {
         var self: Runtime = @import("../core/types.zig").zeroed(Runtime);
         self.opts = opts;
@@ -908,6 +915,43 @@ pub const Runtime = struct {
         }
     }
 
+    // ---- frame timing instrumentation (opt-in, CIPHER_FRAME_TIMING=1) ----
+    // Phases: build (begin + atlas + app.onFrame), layout (flexbox + cmd
+    // emission), encode (cmds -> quads), render (GPU / software raster).
+    // First TIMING_WARM frames count as warmup and are excluded.
+    const TIMING_WARM: u64 = 30;
+    const TIMING_EVERY: u64 = 300;
+
+    fn timingEnabled(self: *Runtime) bool {
+        if (!self.timing_init) {
+            self.timing_on = std.c.getenv("CIPHER_FRAME_TIMING") != null;
+            self.timing_init = true;
+        }
+        return self.timing_on;
+    }
+
+    fn timingDump(self: *Runtime) void {
+        const n: u64 = self.timing_count -| TIMING_WARM;
+        if (n == 0) return;
+        const build_ms = @as(f64, @floatFromInt(self.t_build_ns)) / 1e6 / @as(f64, @floatFromInt(n));
+        const layout_ms = @as(f64, @floatFromInt(self.t_layout_ns)) / 1e6 / @as(f64, @floatFromInt(n));
+        const encode_ms = @as(f64, @floatFromInt(self.t_encode_ns)) / 1e6 / @as(f64, @floatFromInt(n));
+        const render_ms = @as(f64, @floatFromInt(self.t_render_ns)) / 1e6 / @as(f64, @floatFromInt(n));
+        std.debug.print("CIPHER_BENCH frames={d} build_ms={d:.3} layout_ms={d:.3} encode_ms={d:.3} render_ms={d:.3}\n", .{ n, build_ms, layout_ms, encode_ms, render_ms });
+        // Reset the window so each TIMING_EVERY-frame block reports its own mean.
+        self.t_build_ns = 0;
+        self.t_layout_ns = 0;
+        self.t_encode_ns = 0;
+        self.t_render_ns = 0;
+        self.timing_count = TIMING_WARM;
+    }
+
+    fn fnnowNs() i64 {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        return ts.sec * 1_000_000_000 + ts.nsec;
+    }
+
     // ---- frame loop ----
 
     fn pump(self: *Runtime, app: *const App, timeout_ms: i32) !void {
@@ -922,6 +966,14 @@ pub const Runtime = struct {
     fn present(self: *Runtime, app: *const App) !void {
         if (self.ui_state != null) {
             var u = &self.ui_state.?;
+            const timing = self.timingEnabled();
+            const m0: i64 = if (timing) fnnowNs() else 0;
+            var m1: i64 = 0;
+            var m2: i64 = 0;
+            var m3: i64 = 0;
+            _ = &m1;
+            _ = &m2;
+            _ = &m3;
             u.events = self.pending_events.items; // before begin(): begin() reads events for focus semantics
                         u.begin(@floatFromInt(self.logical_w), @floatFromInt(self.logical_h), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed, self.scale_f) catch |e| {
                 if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: ui.begin error: {s}\n", .{@errorName(e)});
@@ -941,11 +993,13 @@ pub const Runtime = struct {
                     if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: onFrame error: {s}\n", .{@errorName(e)});
                     self.ui_state = null;
                 };
+                if (timing) m1 = fnnowNs();
                 if (self.ui_state != null) {
                     u.end() catch |e| {
                         if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: ui.end error: {s}\n", .{@errorName(e)});
                         self.ui_state = null;
                     };
+                    if (timing) m2 = fnnowNs();
                 }
                 if (self.ui_state != null) {
                     // background content first (terminal grid, app-drawn bg),
@@ -963,6 +1017,7 @@ pub const Runtime = struct {
                         if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: buildQuads error: {s}\n", .{@errorName(e)});
                         break :blk eq_len;
                     };
+                    if (timing) m3 = fnnowNs();
                     if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: quads n={d} extra={d} cmds={d} gt={}\n", .{ n, eq_len, u.drawCmds().len, self.gt != null });
                     if (self.gt != null and self.swapchain != null) {
                         self.gt.?.renderPresent(&self.vk, &self.dev, self.quads_buf[0..n], self.swapchain.?) catch |e| blk: {
@@ -982,6 +1037,19 @@ pub const Runtime = struct {
                         const px: []u32 = @ptrCast(@alignCast(self.shm_buf.pixels));
                         for (px[0 .. self.width * self.height]) |*p| p.* = 0xFF04060B;
                         for (self.quads_buf[0..n]) |q| rasterQuad(px, self.width, self.height, q, self.atlas.?.atlas, self.atlas.?.atlas_w, self.atlas.?.atlas_h);
+                    }
+                    if (timing) {
+                        const m4 = fnnowNs();
+                        if (self.timing_count < TIMING_WARM) {
+                            self.timing_count += 1;
+                        } else {
+                            self.t_build_ns += @intCast(@max(0, m1 - m0));
+                            self.t_layout_ns += @intCast(@max(0, m2 - m1));
+                            self.t_encode_ns += @intCast(@max(0, m3 - m2));
+                            self.t_render_ns += @intCast(@max(0, m4 - m3));
+                            self.timing_count += 1;
+                        }
+                        if ((self.timing_count -| TIMING_WARM) % TIMING_EVERY == 0) self.timingDump();
                     }
                 }
             }
