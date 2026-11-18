@@ -7,7 +7,7 @@
 
 # cipher
 
-[![ci](https://github.com/mohamedsalahi/sifr-native/actions/workflows/ci.yml/badge.svg)](https://github.com/mohamedsalahi/sifr-native/actions/workflows/ci.yml)
+[![ci](https://github.com/sifr-salahy/sifr-native/actions/workflows/ci.yml/badge.svg)](https://github.com/sifr-salahy/sifr-native/actions/workflows/ci.yml)
 
 zero-dependency, vulkan-native Linux UI framework for Zig. no toolkit. no glue. every byte is ours.
 

@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
     const units = .{
         .{ "src/core/types.zig", "core_types" },
-        .{ "src/os/linux/wayland/client.zig", "wayland_client" },
+        .{ "src/os/linux/wayland/wayland_client.zig", "wayland_client" },
         .{ "src/gpu/vulkan/loader.zig", "vulkan_loader" },
         .{ "src/gpu/vulkan/loader_test.zig", "vulkan_loader_test" },
         .{ "src/gpu/vulkan/device.zig", "vulkan_device" },

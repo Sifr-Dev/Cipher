@@ -8,6 +8,16 @@ pub const VkInstance = *anyopaque;
 pub const VkPhysicalDevice = *anyopaque;
 pub const VkDevice = *anyopaque;
 pub const VkQueue = *anyopaque;
+pub const VkBool32 = u32;
+pub const VK_TRUE: VkBool32 = 1;
+pub const VK_FALSE: VkBool32 = 0;
+pub const VkSurfaceKHR = *anyopaque;
+pub const VkSwapchainKHR = *anyopaque;
+pub const VK_PRESENT_MODE_FIFO_KHR: u32 = 2;
+pub const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: u32 = 0;
+pub const VK_FORMAT_B8G8R8A8_UNORM: u32 = 44;
+pub const VK_FORMAT_R8G8B8A8_UNORM: u32 = 37;
+pub const VK_FORMAT_B8G8R8A8_SRGB: u32 = 50;
 
 pub const VkApplicationInfo = extern struct {
     sType: u32,
@@ -133,8 +143,6 @@ pub const VK_IMAGE_ASPECT_COLOR_BIT: u32 = 0x00000001;
 pub const VK_COMPONENT_SWIZZLE_IDENTITY: u32 = 0;
 
 // Formats
-pub const VK_FORMAT_R8G8B8A8_UNORM: u32 = 37;
-
 // Samples
 pub const VK_SAMPLE_COUNT_1_BIT: u32 = 0x00000001;
 
@@ -744,6 +752,11 @@ pub const VkFence = *anyopaque;
 pub const VkDescriptorSetLayout = *anyopaque;
 pub const VkDescriptorPool = *anyopaque;
 pub const VkDescriptorSet = *anyopaque;
+pub const VkExtensionProperties = extern struct {
+    extensionName: [256]u8,
+    specVersion: u32,
+};
+
 pub const VkSampler = *anyopaque;
 pub const VkPipelineCache = *anyopaque;
 
@@ -838,7 +851,21 @@ pub const Vulkan = struct {
     vkCreateSampler: *const fn (VkDevice, *const VkSamplerCreateInfo, ?*const anyopaque, *VkSampler) callconv(.c) VkResult,
     vkDestroyRenderPass: *const fn (VkDevice, VkRenderPass, ?*const anyopaque) callconv(.c) void,
     vkDestroyFramebuffer: *const fn (VkDevice, VkFramebuffer, ?*const anyopaque) callconv(.c) void,
+    vkEnumerateInstanceExtensionProperties: *const fn (?*const anyopaque, *u32, ?*anyopaque) callconv(.c) VkResult,
+    vkEnumerateDeviceExtensionProperties: *const fn (VkPhysicalDevice, ?*const anyopaque, *u32, ?*anyopaque) callconv(.c) VkResult,
     vkDestroySampler: *const fn (VkDevice, VkSampler, ?*const anyopaque) callconv(.c) void,
+    // ---- WSI: surface + swapchain ----
+    vkCreateWaylandSurfaceKHR: *const fn (VkInstance, *const anyopaque, ?*const anyopaque, *VkSurfaceKHR) callconv(.c) VkResult,
+    vkDestroySurfaceKHR: *const fn (VkInstance, VkSurfaceKHR, ?*const anyopaque) callconv(.c) void,
+    vkGetPhysicalDeviceSurfaceSupportKHR: *const fn (VkPhysicalDevice, u32, VkSurfaceKHR, *VkBool32) callconv(.c) VkResult,
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR: *const fn (VkPhysicalDevice, VkSurfaceKHR, *anyopaque) callconv(.c) VkResult,
+    vkGetPhysicalDeviceSurfaceFormatsKHR: *const fn (VkPhysicalDevice, VkSurfaceKHR, *u32, ?*anyopaque) callconv(.c) VkResult,
+    vkGetPhysicalDeviceSurfacePresentModesKHR: *const fn (VkPhysicalDevice, VkSurfaceKHR, *u32, ?*u32) callconv(.c) VkResult,
+    vkCreateSwapchainKHR: *const fn (VkDevice, *const anyopaque, ?*const anyopaque, *VkSwapchainKHR) callconv(.c) VkResult,
+    vkDestroySwapchainKHR: *const fn (VkDevice, VkSwapchainKHR, ?*const anyopaque) callconv(.c) void,
+    vkGetSwapchainImagesKHR: *const fn (VkDevice, VkSwapchainKHR, *u32, ?*VkImage) callconv(.c) VkResult,
+    vkAcquireNextImageKHR: *const fn (VkDevice, VkSwapchainKHR, u64, VkSemaphore, VkFence, *u32) callconv(.c) VkResult,
+    vkQueuePresentKHR: *const fn (VkQueue, *const anyopaque) callconv(.c) VkResult,
 };
 
 pub fn load() !Vulkan {
@@ -922,7 +949,20 @@ pub fn load() !Vulkan {
     const cmd_end_render_pass = std.c.dlsym(handle, "vkCmdEndRenderPass") orelse return error.DlsymFailed;
     const cmd_bind_vertex_buffers = std.c.dlsym(handle, "vkCmdBindVertexBuffers") orelse return error.DlsymFailed;
     const cmd_copy_buffer_to_image = std.c.dlsym(handle, "vkCmdCopyBufferToImage") orelse return error.DlsymFailed;
+    const enum_instance_ext = std.c.dlsym(handle, "vkEnumerateInstanceExtensionProperties") orelse return error.DlsymFailed;
+    const enum_device_ext = std.c.dlsym(handle, "vkEnumerateDeviceExtensionProperties") orelse return error.DlsymFailed;
     const create_sampler = std.c.dlsym(handle, "vkCreateSampler") orelse return error.DlsymFailed;
+    const create_wayland_surface = std.c.dlsym(handle, "vkCreateWaylandSurfaceKHR") orelse return error.DlsymFailed;
+    const destroy_surface = std.c.dlsym(handle, "vkDestroySurfaceKHR") orelse return error.DlsymFailed;
+    const get_surf_support = std.c.dlsym(handle, "vkGetPhysicalDeviceSurfaceSupportKHR") orelse return error.DlsymFailed;
+    const get_surf_caps = std.c.dlsym(handle, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") orelse return error.DlsymFailed;
+    const get_surf_formats = std.c.dlsym(handle, "vkGetPhysicalDeviceSurfaceFormatsKHR") orelse return error.DlsymFailed;
+    const get_surf_present_modes = std.c.dlsym(handle, "vkGetPhysicalDeviceSurfacePresentModesKHR") orelse return error.DlsymFailed;
+    const create_swapchain = std.c.dlsym(handle, "vkCreateSwapchainKHR") orelse return error.DlsymFailed;
+    const destroy_swapchain = std.c.dlsym(handle, "vkDestroySwapchainKHR") orelse return error.DlsymFailed;
+    const get_swapchain_images = std.c.dlsym(handle, "vkGetSwapchainImagesKHR") orelse return error.DlsymFailed;
+    const acquire_next_image = std.c.dlsym(handle, "vkAcquireNextImageKHR") orelse return error.DlsymFailed;
+    const queue_present = std.c.dlsym(handle, "vkQueuePresentKHR") orelse return error.DlsymFailed;
     const destroy_render_pass = std.c.dlsym(handle, "vkDestroyRenderPass") orelse return error.DlsymFailed;
     const destroy_framebuffer = std.c.dlsym(handle, "vkDestroyFramebuffer") orelse return error.DlsymFailed;
     const destroy_sampler = std.c.dlsym(handle, "vkDestroySampler") orelse return error.DlsymFailed;
@@ -1003,7 +1043,20 @@ pub fn load() !Vulkan {
         .vkCmdEndRenderPass = @ptrCast(cmd_end_render_pass),
         .vkCmdBindVertexBuffers = @ptrCast(cmd_bind_vertex_buffers),
         .vkCmdCopyBufferToImage = @ptrCast(cmd_copy_buffer_to_image),
+        .vkEnumerateInstanceExtensionProperties = @ptrCast(enum_instance_ext),
+        .vkEnumerateDeviceExtensionProperties = @ptrCast(enum_device_ext),
         .vkCreateSampler = @ptrCast(create_sampler),
+        .vkCreateWaylandSurfaceKHR = @ptrCast(create_wayland_surface),
+        .vkDestroySurfaceKHR = @ptrCast(destroy_surface),
+        .vkGetPhysicalDeviceSurfaceSupportKHR = @ptrCast(get_surf_support),
+        .vkGetPhysicalDeviceSurfaceCapabilitiesKHR = @ptrCast(get_surf_caps),
+        .vkGetPhysicalDeviceSurfaceFormatsKHR = @ptrCast(get_surf_formats),
+        .vkGetPhysicalDeviceSurfacePresentModesKHR = @ptrCast(get_surf_present_modes),
+        .vkCreateSwapchainKHR = @ptrCast(create_swapchain),
+        .vkDestroySwapchainKHR = @ptrCast(destroy_swapchain),
+        .vkGetSwapchainImagesKHR = @ptrCast(get_swapchain_images),
+        .vkAcquireNextImageKHR = @ptrCast(acquire_next_image),
+        .vkQueuePresentKHR = @ptrCast(queue_present),
         .vkDestroyRenderPass = @ptrCast(destroy_render_pass),
         .vkDestroyFramebuffer = @ptrCast(destroy_framebuffer),
         .vkDestroySampler = @ptrCast(destroy_sampler),
@@ -1026,6 +1079,37 @@ pub fn createDevice(vulkan: *Vulkan, out: *Device) !void {
         .apiVersion = VK_API_VERSION_1_0,
     };
 
+    // WSI instance extensions (best-effort: present on NVIDIA/Mesa, skip if missing)
+    var instance_extensions: [2][*:0]const u8 = undefined;
+    var iext_count: u32 = 0;
+    const ext_names = [2][*:0]const u8{
+        "VK_KHR_surface",
+        "VK_KHR_wayland_surface",
+    };
+    var ext_probe: [256]u32 = undefined;
+    var ext_count: u32 = 256;
+    if (vulkan.vkEnumerateInstanceExtensionProperties(null, &ext_count, null) == VK_SUCCESS) {
+        // count only; we just check names we need
+        _ = &ext_probe;
+    }
+    // Check each wanted extension exists; build the enable list from what's there.
+    var ext_props: [256]VkExtensionProperties = undefined;
+    var got: u32 = ext_count;
+    if (vulkan.vkEnumerateInstanceExtensionProperties(null, &got, &ext_props) == VK_SUCCESS) {
+        for (ext_names) |want| {
+            var i: u32 = 0;
+            while (i < got) : (i += 1) {
+                const name_z: [*:0]const u8 = @ptrCast(&ext_props[i].extensionName);
+                if (std.mem.eql(u8, std.mem.span(name_z), std.mem.span(want))) {
+                    instance_extensions[iext_count] = want;
+                    iext_count += 1;
+                    break;
+                }
+            }
+        }
+    }
+    const ext_ptr: ?**const u8 = if (iext_count > 0) @ptrCast(&instance_extensions) else null;
+
     const instance_info = VkInstanceCreateInfo{
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pNext = null,
@@ -1033,8 +1117,8 @@ pub fn createDevice(vulkan: *Vulkan, out: *Device) !void {
         .pApplicationInfo = &app_info,
         .enabledLayerCount = 0,
         .ppEnabledLayerNames = null,
-        .enabledExtensionCount = 0,
-        .ppEnabledExtensionNames = null,
+        .enabledExtensionCount = iext_count,
+        .ppEnabledExtensionNames = ext_ptr,
     };
 
     if (vulkan.vkCreateInstance(&instance_info, null, &instance) != VK_SUCCESS) {
@@ -1070,6 +1154,21 @@ pub fn createDevice(vulkan: *Vulkan, out: *Device) !void {
         .pQueuePriorities = &queue_priority,
     };
 
+    // Device extension: VK_KHR_swapchain (skip if missing)
+    var device_extensions: [1][*:0]const u8 = undefined;
+    var dext_count: u32 = 0;
+    var dext_props: [256]VkExtensionProperties = undefined;
+    var dext_got: u32 = 256;
+    if (vulkan.vkEnumerateDeviceExtensionProperties(physical, null, &dext_got, &dext_props) == VK_SUCCESS) {
+        for (dext_props[0..dext_got]) |*p| {
+            if (std.mem.eql(u8, std.mem.span(@as([*:0]const u8, @ptrCast(&p.extensionName))), "VK_KHR_swapchain")) {
+                device_extensions[dext_count] = "VK_KHR_swapchain";
+                dext_count += 1;
+            }
+        }
+    }
+    const dext_ptr: ?**const u8 = if (dext_count > 0) @ptrCast(&device_extensions) else null;
+
     const device_info = VkDeviceCreateInfo{
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext = null,
@@ -1078,8 +1177,8 @@ pub fn createDevice(vulkan: *Vulkan, out: *Device) !void {
         .pQueueCreateInfos = &queue_info,
         .enabledLayerCount = 0,
         .ppEnabledLayerNames = null,
-        .enabledExtensionCount = 0,
-        .ppEnabledExtensionNames = null,
+        .enabledExtensionCount = dext_count,
+        .ppEnabledExtensionNames = dext_ptr,
         .pEnabledFeatures = null,
     };
 
