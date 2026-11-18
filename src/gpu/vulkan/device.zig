@@ -4,6 +4,8 @@ const std = @import("std");
 
 pub const VkResult = i32;
 pub const VK_SUCCESS: VkResult = 0;
+pub const VK_SUBOPTIMAL_KHR: VkResult = 1000001003;
+pub const VK_ERROR_OUT_OF_DATE_KHR: VkResult = -1000001004;
 pub const VkInstance = *anyopaque;
 pub const VkPhysicalDevice = *anyopaque;
 pub const VkDevice = *anyopaque;
@@ -13,9 +15,21 @@ pub const VK_TRUE: VkBool32 = 1;
 pub const VK_FALSE: VkBool32 = 0;
 pub const VkSurfaceKHR = *anyopaque;
 pub const VkSwapchainKHR = *anyopaque;
+pub const VK_PRESENT_MODE_MAILBOX_KHR: u32 = 1;
+pub const VK_PRESENT_MODE_IMMEDIATE_KHR: u32 = 0;
 pub const VK_PRESENT_MODE_FIFO_KHR: u32 = 2;
+pub const VK_PRESENT_MODE_FIFO_RELAXED_KHR: u32 = 3;
+pub const VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR: u32 = 0x1;
+pub const VK_COMPOSITE_ALPHA_INHERITED_BIT_KHR: u32 = 0x8;
+pub const VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR: u32 = 0x0;
+pub const VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: u32 = 1000001002;
+pub const VK_SHARING_MODE_CONCURRENT: u32 = 1;
+pub const VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR: u32 = 1000001000;
+pub const VK_STRUCTURE_TYPE_PRESENT_INFO_KHR: u32 = 1000004001;
+pub const VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR: u32 = 1000006000;
 pub const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: u32 = 0;
 pub const VK_FORMAT_B8G8R8A8_UNORM: u32 = 44;
+pub const VK_FORMAT_R8G8B8A8_SRGB: u32 = 43;
 pub const VK_FORMAT_R8G8B8A8_UNORM: u32 = 37;
 pub const VK_FORMAT_B8G8R8A8_SRGB: u32 = 50;
 
@@ -315,7 +329,7 @@ pub const VkSubmitInfo = extern struct {
     pNext: ?*const anyopaque,
     waitSemaphoreCount: u32,
     pWaitSemaphores: ?*const anyopaque,
-    pWaitDstStageMask: ?*const u32,
+    pWaitDstStageMask: ?[*]const u32,
     commandBufferCount: u32,
     pCommandBuffers: ?*const anyopaque,
     signalSemaphoreCount: u32,
@@ -757,6 +771,60 @@ pub const VkExtensionProperties = extern struct {
     specVersion: u32,
 };
 
+pub const VkSurfaceCapabilitiesKHR = extern struct {
+    minImageCount: u32,
+    maxImageCount: u32,
+    currentExtent: VkExtent2D,
+    minImageExtent: VkExtent2D,
+    maxImageExtent: VkExtent2D,
+    maxImageArrayLayers: u32,
+    supportedTransforms: u32,
+    currentTransform: u32,
+    supportedCompositeAlpha: u32,
+    supportedUsageFlags: u32,
+};
+pub const VkSurfaceFormatKHR = extern struct {
+    format: u32,
+    colorSpace: u32,
+};
+pub const VkWaylandSurfaceCreateInfoKHR = extern struct {
+    sType: u32,
+    pNext: ?*const anyopaque,
+    flags: u32,
+    display: ?*anyopaque,
+    surface: ?*anyopaque,
+};
+pub const VkSwapchainCreateInfoKHR = extern struct {
+    sType: u32,
+    pNext: ?*const anyopaque,
+    flags: u32,
+    surface: VkSurfaceKHR,
+    minImageCount: u32,
+    imageFormat: u32,
+    imageColorSpace: u32,
+    imageExtent: VkExtent2D,
+    imageArrayLayers: u32,
+    imageUsage: u32,
+    imageSharingMode: u32,
+    queueFamilyIndexCount: u32,
+    pQueueFamilyIndices: ?*const u32,
+    preTransform: u32,
+    compositeAlpha: u32,
+    presentMode: u32,
+    clipped: VkBool32,
+    oldSwapchain: ?*anyopaque,
+};
+pub const VkPresentInfoKHR = extern struct {
+    sType: u32,
+    pNext: ?*const anyopaque,
+    waitSemaphoreCount: u32,
+    pWaitSemaphores: ?[*]const VkSemaphore,
+    swapchainCount: u32,
+    pSwapchains: ?[*]const VkSwapchainKHR,
+    pImageIndices: ?[*]const u32,
+    pResults: ?[*]const VkResult,
+};
+
 pub const VkSampler = *anyopaque;
 pub const VkPipelineCache = *anyopaque;
 
@@ -864,7 +932,7 @@ pub const Vulkan = struct {
     vkCreateSwapchainKHR: *const fn (VkDevice, *const anyopaque, ?*const anyopaque, *VkSwapchainKHR) callconv(.c) VkResult,
     vkDestroySwapchainKHR: *const fn (VkDevice, VkSwapchainKHR, ?*const anyopaque) callconv(.c) void,
     vkGetSwapchainImagesKHR: *const fn (VkDevice, VkSwapchainKHR, *u32, ?*VkImage) callconv(.c) VkResult,
-    vkAcquireNextImageKHR: *const fn (VkDevice, VkSwapchainKHR, u64, VkSemaphore, VkFence, *u32) callconv(.c) VkResult,
+    vkAcquireNextImageKHR: *const fn (VkDevice, VkSwapchainKHR, u64, VkSemaphore, ?*anyopaque, *u32) callconv(.c) VkResult,
     vkQueuePresentKHR: *const fn (VkQueue, *const anyopaque) callconv(.c) VkResult,
 };
 
@@ -1093,9 +1161,12 @@ pub fn createDevice(vulkan: *Vulkan, out: *Device) !void {
         _ = &ext_probe;
     }
     // Check each wanted extension exists; build the enable list from what's there.
-    var ext_props: [256]VkExtensionProperties = undefined;
-    var got: u32 = ext_count;
-    if (vulkan.vkEnumerateInstanceExtensionProperties(null, &got, &ext_props) == VK_SUCCESS) {
+    var inst_total: u32 = 0;
+    _ = vulkan.vkEnumerateInstanceExtensionProperties(null, &inst_total, null);
+    const ext_props = std.heap.page_allocator.alloc(VkExtensionProperties, inst_total) catch return DeviceError.CreateInstanceFailed;
+    defer std.heap.page_allocator.free(ext_props);
+    var got: u32 = inst_total;
+    if (vulkan.vkEnumerateInstanceExtensionProperties(null, &got, ext_props.ptr) == VK_SUCCESS) {
         for (ext_names) |want| {
             var i: u32 = 0;
             while (i < got) : (i += 1) {
@@ -1157,15 +1228,29 @@ pub fn createDevice(vulkan: *Vulkan, out: *Device) !void {
     // Device extension: VK_KHR_swapchain (skip if missing)
     var device_extensions: [1][*:0]const u8 = undefined;
     var dext_count: u32 = 0;
-    var dext_props: [256]VkExtensionProperties = undefined;
-    var dext_got: u32 = 256;
-    if (vulkan.vkEnumerateDeviceExtensionProperties(physical, null, &dext_got, &dext_props) == VK_SUCCESS) {
+    var dext_total: u32 = 0;
+    _ = vulkan.vkEnumerateDeviceExtensionProperties(physical, null, &dext_total, null);
+    const dext_props = std.heap.page_allocator.alloc(VkExtensionProperties, dext_total) catch return DeviceError.CreateDeviceFailed;
+    defer std.heap.page_allocator.free(dext_props);
+    var dext_got: u32 = dext_total;
+    const enum_rc = vulkan.vkEnumerateDeviceExtensionProperties(physical, null, &dext_got, dext_props.ptr);
+    if (enum_rc == VK_SUCCESS) {
+        if (std.c.getenv("CIPHER_DEBUG_VKEXT") != null) {
+            std.debug.print("cipher: device extensions enumerated: {d}\n", .{dext_got});
+            var di: u32 = 0;
+            while (di < dext_got) : (di += 1) {
+                const nm: [*:0]const u8 = @ptrCast(&dext_props[di].extensionName);
+                std.debug.print("cipher: dext[{d}]={s}\n", .{ di, std.mem.span(nm) });
+            }
+        }
         for (dext_props[0..dext_got]) |*p| {
             if (std.mem.eql(u8, std.mem.span(@as([*:0]const u8, @ptrCast(&p.extensionName))), "VK_KHR_swapchain")) {
                 device_extensions[dext_count] = "VK_KHR_swapchain";
                 dext_count += 1;
             }
         }
+    } else {
+        std.debug.print("cipher: vkEnumerateDeviceExtensionProperties failed with {d} (dext_got={d})\n", .{ enum_rc, dext_got });
     }
     const dext_ptr: ?**const u8 = if (dext_count > 0) @ptrCast(&device_extensions) else null;
 

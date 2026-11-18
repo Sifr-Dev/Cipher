@@ -7,6 +7,7 @@
 const std = @import("std");
 const wayland = @import("../os/linux/wayland/wayland_client.zig");
 const device = @import("../gpu/vulkan/device.zig");
+const swapchain_mod = @import("../gpu/vulkan/swapchain.zig");
 const text_gpu = @import("../gpu/vulkan/text.zig");
 const atlas_mod = @import("../ui/text/atlas.zig");
 const ui_mod = @import("../ui/ui.zig");
@@ -243,6 +244,7 @@ pub const Runtime = struct {
     logical_w: u32 = 0,
     logical_h: u32 = 0,
     shm_buf: wayland.ShmBuffer,
+    swapchain: ?*swapchain_mod.Swapchain = null,
 
     // GPU / UI
     vk: device.Vulkan = undefined,
@@ -445,7 +447,21 @@ pub const Runtime = struct {
                 }
             } else |_| {}
         } else |_| {}
-        std.debug.print("cipher: render path = {s}\n", .{if (self.gt != null) "vulkan-gpu-ui" else "software-shm"});
+        // WSI: direct Vulkan presentation (no readback/wl_shm on this path)
+        if (self.vk_loaded and std.c.getenv("CIPHER_FORCE_SOFTWARE") == null and std.c.getenv("CIPHER_DISABLE_WSI") == null) {
+            const surf_proxy = self.conn.proxyFromToken(self.surface);
+            if (surf_proxy) |proxy| {
+                if (swapchain_mod.Swapchain.init(&self.vk, &self.dev, @as(?*anyopaque, self.conn.display), @as(?*anyopaque, proxy), self.width, self.height, std.heap.page_allocator)) |sc| {
+                    const boxed = try std.heap.page_allocator.create(swapchain_mod.Swapchain);
+                    boxed.* = sc;
+                    self.swapchain = boxed;
+                    std.debug.print("cipher: WSI swapchain active ({d}x{d} format {d})\n", .{ sc.width, sc.height, sc.format });
+                } else |e| {
+                    std.debug.print("cipher: WSI unavailable, falling back to shm present ({s})\n", .{@errorName(e)});
+                }
+            }
+        }
+        std.debug.print("cipher: render path = {s}\n", .{if (self.swapchain != null) "vulkan-wsi" else if (self.gt != null) "vulkan-gpu-ui-shm" else "software-shm"});
 
         self.conn.setNonBlocking();
         return self;
@@ -525,6 +541,11 @@ pub const Runtime = struct {
         if (self.shm_pool != 0) wayland.shmPoolDestroy(self.conn, self.shm_pool);
         if (self.surface != 0) wayland.surfaceDestroy(self.conn, self.surface);
         if (self.ui_state) |*u| u.deinit();
+        if (self.swapchain) |sc| {
+            sc.deinit(&self.vk, &self.dev);
+            std.heap.page_allocator.destroy(sc);
+            self.swapchain = null;
+        }
         if (self.gt) |*g| g.deinitSoft(&self.vk, &self.dev);
         if (self.atlas) |a| {
             a.deinit();
@@ -557,9 +578,17 @@ pub const Runtime = struct {
             wayland.shmPoolDestroy(self.conn, self.shm_pool);
             self.shm_pool = 0;
         }
-        self.shm_buf.deinit();
         self.width = w;
         self.height = h;
+        if (self.swapchain) |sc| {
+            sc.recreate(&self.vk, &self.dev, w, h) catch {
+                std.debug.print("cipher: swapchain recreate failed, falling back to shm present\n", .{});
+                sc.deinit(&self.vk, &self.dev);
+                std.heap.page_allocator.destroy(sc);
+                self.swapchain = null;
+            };
+        }
+        self.shm_buf.deinit();
         self.shm_buf = try wayland.ShmBuffer.allocate(w, h);
         try self.makeShmObjects();
         // negotiate buffer<->surface mapping: integer buffer_scale when
@@ -935,7 +964,15 @@ pub const Runtime = struct {
                         break :blk eq_len;
                     };
                     if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: quads n={d} extra={d} cmds={d} gt={}\n", .{ n, eq_len, u.drawCmds().len, self.gt != null });
-                    if (self.gt) |*g| {
+                    if (self.gt != null and self.swapchain != null) {
+                        self.gt.?.renderPresent(&self.vk, &self.dev, self.quads_buf[0..n], self.swapchain.?) catch |e| blk: {
+                            if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: renderPresent error: {s}\n", .{@errorName(e)});
+                            if (e == error.OutOfDate) {
+                                self.swapchain.?.recreate(&self.vk, &self.dev, self.width, self.height) catch {};
+                            }
+                            break :blk;
+                        };
+                    } else if (self.gt) |*g| {
                         try g.render(&self.vk, &self.dev, self.quads_buf[0..n]);
                         const src = g.pixels();
                         @memcpy(self.shm_buf.pixels[0..src.len], src);
@@ -961,14 +998,17 @@ pub const Runtime = struct {
         self.pending_events.clearRetainingCapacity();
         _ = self.events_arena.reset(.free_all);
 
-        // attach + damage + commit
-        wayland.surfaceAttach(self.conn, self.surface, self.buffer, 0, 0);
-        wayland.surfaceDamage(self.conn, self.surface, 0, 0, @intCast(self.logical_w), @intCast(self.logical_h));
-        wayland.surfaceCommit(self.conn, self.surface);
+        if (self.swapchain == null) {
+            // attach + damage + commit
+            wayland.surfaceAttach(self.conn, self.surface, self.buffer, 0, 0);
+            wayland.surfaceDamage(self.conn, self.surface, 0, 0, @intCast(self.logical_w), @intCast(self.logical_h));
+            wayland.surfaceCommit(self.conn, self.surface);
 
-        // request next vsync frame callback
-        self.frame_cb = wayland.surfaceFrame(self.conn, self.surface) catch null;
-        wayland.surfaceCommit(self.conn, self.surface);
+            // request next vsync frame callback
+            self.frame_cb = wayland.surfaceFrame(self.conn, self.surface) catch null;
+            wayland.surfaceCommit(self.conn, self.surface);
+        }
+        // WSI path: presents are driven by the swapchain; no wl_shm attach needed
     }
 
     fn dumpFrame(self: *Runtime, n: u32) void {
@@ -979,13 +1019,19 @@ pub const Runtime = struct {
         var hdr: [128]u8 = undefined;
         const h = std.fmt.bufPrint(&hdr, "P6\n{d} {d}\n255\n", .{ self.width, self.height }) catch return;
         _ = std.os.linux.write(fd, h.ptr, h.len);
-        // shm pixels are BGRA (ARGB8888 little-endian); emit RGB
-        const stride = self.shm_buf.stride;
+        // WSI path: pixels come from the fence-waited GPU readback buffer.
+        // Otherwise from the wl_shm buffer the runtime filled via memcpy.
+        var src_pixels: []const u8 = self.shm_buf.pixels;
+        if (self.swapchain != null) {
+            if (self.gt) |*g| src_pixels = g.pixels();
+        }
+        // pixels are BGRA (ARGB8888 little-endian); emit RGB
+        const stride = self.width * 4;
         var row_buf = std.heap.page_allocator.alloc(u8, self.width * 3) catch return;
         defer std.heap.page_allocator.free(row_buf);
         var y: u32 = 0;
         while (y < self.height) : (y += 1) {
-            const src = self.shm_buf.pixels[y * stride ..][0 .. self.width * 4];
+            const src = src_pixels[y * stride ..][0 .. self.width * 4];
             var x: u32 = 0;
             while (x < self.width) : (x += 1) {
                 row_buf[x * 3 + 0] = src[x * 4 + 2]; // R
@@ -1006,9 +1052,12 @@ pub const Runtime = struct {
         }
         try self.present(app); // first frame immediately
         self.dumpFrame(0);
+        // WSI: the swapchain acquire is the vsync pacer, so pump nonblocking;
+        // the shm path is paced by wl_surface frame callbacks (frame_due).
+        const use_wsi = self.swapchain != null;
         while (!self.quit) {
-            try self.pump(app, -1); // block until input or vsync callback
-            if (self.frame_due) {
+            try self.pump(app, if (use_wsi) @as(i32, 0) else -1);
+            if (use_wsi or self.frame_due) {
                 self.frame_due = false;
                 try self.present(app);
                 self.dumpFrame(frames + 1);

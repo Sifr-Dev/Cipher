@@ -6,6 +6,7 @@
 const std = @import("std");
 const d = @import("device.zig");
 const shader = @import("shader.zig");
+const swapchain_mod = @import("swapchain.zig");
 
 pub const Vulkan = d.Vulkan;
 pub const Device = d.Device;
@@ -743,11 +744,8 @@ pub const GpuText = struct {
     }
 
     /// Render glyph quads and copy the frame to the host buffer.
-    pub fn render(self: *GpuText, vk: *Vulkan, dev: *const Device, quads: []const Quad) !void {
-        const dev_handle = dev.device;
+    fn fillVertices(self: *GpuText, quads: []const Quad) !usize {
         if (quads.len > MAX_QUADS) return error.TooManyQuads;
-
-        // Build the vertex array (2 triangles per quad).
         const verts = @as([*]Vertex, @ptrCast(@alignCast(self.vb_mapped)))[0 .. quads.len * 6];
         for (quads, 0..) |q, i| {
             const x1 = q.x + q.w;
@@ -762,20 +760,13 @@ pub const GpuText = struct {
             };
             @memcpy(verts[i * 6 ..][0..6], &quad_verts);
         }
+        return quads.len * 6;
+    }
 
-        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), true, std.math.maxInt(u64)) != d.VK_SUCCESS)
-            return error.WaitFenceFailed;
-        if (vk.vkResetFences(dev_handle, 1, @ptrCast(&self.fence)) != d.VK_SUCCESS)
-            return error.ResetFenceFailed;
-        const begin_info = d.VkCommandBufferBeginInfo{
-            .sType = d.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-            .pNext = null,
-            .flags = d.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            .pInheritanceInfo = null,
-        };
-        if (vk.vkBeginCommandBuffer(self.cmd, &begin_info) != d.VK_SUCCESS)
-            return error.BeginCommandBufferFailed;
-
+    /// Record the shared barrier+renderpass+draw sequence into self.cmd.
+    /// barrier_image: attachment image to transition UNDEFINED->COLOR_ATTACHMENT_OPTIMAL
+    /// (offscreen self.image or the swapchain image).
+    fn recordCommand(self: *GpuText, vk: *Vulkan, barrier_image: d.VkImage, render_pass: d.VkRenderPass, framebuffer: d.VkFramebuffer, n_verts: usize, dump_copy: bool, dump_final_layout: u32) !void {
         const subrange = d.VkImageSubresourceRange{
             .aspectMask = d.VK_IMAGE_ASPECT_COLOR_BIT,
             .baseMipLevel = 0,
@@ -792,7 +783,7 @@ pub const GpuText = struct {
             .newLayout = d.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .srcQueueFamilyIndex = d.VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = d.VK_QUEUE_FAMILY_IGNORED,
-            .image = self.image,
+            .image = barrier_image,
             .subresourceRange = subrange,
         };
         vk.vkCmdPipelineBarrier(self.cmd, d.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, d.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, null, 0, null, 1, @ptrCast(&barrier1));
@@ -803,8 +794,8 @@ pub const GpuText = struct {
         const rp_begin = d.VkRenderPassBeginInfo{
             .sType = d.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .pNext = null,
-            .renderPass = self.render_pass,
-            .framebuffer = self.framebuffer,
+            .renderPass = render_pass,
+            .framebuffer = framebuffer,
             .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = self.width, .height = self.height } },
             .clearValueCount = 1,
             .pClearValues = @ptrCast(&clear),
@@ -818,37 +809,131 @@ pub const GpuText = struct {
         vk.vkCmdPushConstants(self.cmd, self.pipeline_layout, d.VK_SHADER_STAGE_VERTEX_BIT | d.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), @ptrCast(&pc));
         const vb_off: u64 = 0;
         vk.vkCmdBindVertexBuffers(self.cmd, 0, 1, @ptrCast(&self.vb), @ptrCast(&vb_off));
-        vk.vkCmdDraw(self.cmd, @intCast(quads.len * 6), 1, 0, 0);
+        vk.vkCmdDraw(self.cmd, @intCast(n_verts), 1, 0, 0);
         vk.vkCmdEndRenderPass(self.cmd);
 
-        const barrier2 = d.VkImageMemoryBarrier{
-            .sType = d.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .pNext = null,
-            .srcAccessMask = d.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-            .dstAccessMask = d.VK_ACCESS_TRANSFER_READ_BIT,
-            .oldLayout = d.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            .newLayout = d.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            .srcQueueFamilyIndex = d.VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = d.VK_QUEUE_FAMILY_IGNORED,
-            .image = self.image,
-            .subresourceRange = subrange,
-        };
-        vk.vkCmdPipelineBarrier(self.cmd, d.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, d.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, @ptrCast(&barrier2));
-
-        const copy = d.VkBufferImageCopy{
-            .bufferOffset = 0,
-            .bufferRowLength = 0,
-            .bufferImageHeight = 0,
-            .imageSubresource = .{
+        if (dump_copy) {
+            const subrange2 = d.VkImageSubresourceRange{
                 .aspectMask = d.VK_IMAGE_ASPECT_COLOR_BIT,
-                .mipLevel = 0,
+                .baseMipLevel = 0,
+                .levelCount = 1,
                 .baseArrayLayer = 0,
                 .layerCount = 1,
-            },
-            .imageOffset = .{ .x = 0, .y = 0, .z = 0 },
-            .imageExtent = .{ .width = self.width, .height = self.height, .depth = 1 },
+            };
+            const barrier2 = d.VkImageMemoryBarrier{
+                .sType = d.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = null,
+                .srcAccessMask = d.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .dstAccessMask = d.VK_ACCESS_TRANSFER_READ_BIT,
+                .oldLayout = dump_final_layout,
+                .newLayout = dump_final_layout,
+                .srcQueueFamilyIndex = d.VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = d.VK_QUEUE_FAMILY_IGNORED,
+                .image = barrier_image,
+                .subresourceRange = subrange2,
+            };
+            vk.vkCmdPipelineBarrier(self.cmd, d.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, d.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, @ptrCast(&barrier2));
+            const copy = d.VkBufferImageCopy{
+                .bufferOffset = 0,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource = .{
+                    .aspectMask = d.VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+                .imageOffset = .{ .x = 0, .y = 0, .z = 0 },
+                .imageExtent = .{ .width = self.width, .height = self.height, .depth = 1 },
+            };
+            vk.vkCmdCopyImageToBuffer(self.cmd, barrier_image, dump_final_layout, self.buffer, 1, @ptrCast(&copy));
+        }
+    }
+
+    /// WSI path: acquire a swapchain image, render into it, present it.
+    /// No readback, no wl_shm copy, no BARRIER-to-TRANSFER; the render pass's
+    /// finalLayout is PRESENT_SRC_KHR.
+    pub fn renderPresent(self: *GpuText, vk: *Vulkan, dev: *const Device, quads: []const Quad, swap: *swapchain_mod.Swapchain) !void {
+        const dev_handle = dev.device;
+        const n_verts = try self.fillVertices(quads);
+
+        const frame = swap.frame_index % swapchain_mod.VK_MAX_FRAMES_IN_FLIGHT;
+        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), true, std.math.maxInt(u64)) != d.VK_SUCCESS)
+            return error.WaitFenceFailed;
+        if (vk.vkResetFences(dev_handle, 1, @ptrCast(&self.fence)) != d.VK_SUCCESS)
+            return error.ResetFenceFailed;
+
+        const image_index = try swap.acquire(vk, dev);
+        const sc_image = swap.images[image_index];
+        const sc_framebuffer = swap.framebuffers[image_index];
+
+        const cmd_begin = d.VkCommandBufferBeginInfo{
+            .sType = d.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext = null,
+            .flags = d.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            .pInheritanceInfo = null,
         };
-        vk.vkCmdCopyImageToBuffer(self.cmd, self.image, d.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, self.buffer, 1, @ptrCast(&copy));
+        _ = cmd_begin;
+
+        const begin_info = d.VkCommandBufferBeginInfo{
+            .sType = d.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext = null,
+            .flags = d.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            .pInheritanceInfo = null,
+        };
+        if (vk.vkBeginCommandBuffer(self.cmd, &begin_info) != d.VK_SUCCESS)
+            return error.BeginCommandBufferFailed;
+        try self.recordCommand(vk, sc_image, swap.render_pass, sc_framebuffer, n_verts, std.c.getenv("CIPHER_DUMP_FRAME") != null, d.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        if (vk.vkEndCommandBuffer(self.cmd) != d.VK_SUCCESS)
+            return error.EndCommandBufferFailed;
+
+        const wait_sems = [_]d.VkSemaphore{swap.acquire_sem[frame]};
+        const signal_sems = [_]d.VkSemaphore{swap.render_sem[frame]};
+        const wait_stages = [_]u32{d.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        const submit_info = d.VkSubmitInfo{
+            .sType = d.VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext = null,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &wait_sems,
+            .pWaitDstStageMask = &wait_stages,
+            .commandBufferCount = 1,
+            .pCommandBuffers = @ptrCast(&self.cmd),
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &signal_sems,
+        };
+        if (vk.vkQueueSubmit(dev.queue, 1, &submit_info, self.fence) != d.VK_SUCCESS)
+            return error.QueueSubmitFailed;
+
+        if (std.c.getenv("CIPHER_DUMP_FRAME") != null) {
+            if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), true, std.math.maxInt(u64)) != d.VK_SUCCESS)
+                return error.WaitFenceFailed;
+        }
+
+        try swap.present(vk, dev, image_index);
+    }
+
+    pub fn render(self: *GpuText, vk: *Vulkan, dev: *const Device, quads: []const Quad) !void {
+        const dev_handle = dev.device;
+        if (quads.len > MAX_QUADS) return error.TooManyQuads;
+
+        // Build the vertex array (2 triangles per quad).
+        const n_verts = try self.fillVertices(quads);
+
+        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), true, std.math.maxInt(u64)) != d.VK_SUCCESS)
+            return error.WaitFenceFailed;
+        if (vk.vkResetFences(dev_handle, 1, @ptrCast(&self.fence)) != d.VK_SUCCESS)
+            return error.ResetFenceFailed;
+        const begin_info = d.VkCommandBufferBeginInfo{
+            .sType = d.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext = null,
+            .flags = d.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            .pInheritanceInfo = null,
+        };
+        if (vk.vkBeginCommandBuffer(self.cmd, &begin_info) != d.VK_SUCCESS)
+            return error.BeginCommandBufferFailed;
+
+        try self.recordCommand(vk, self.image, self.render_pass, self.framebuffer, n_verts, true, d.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
         if (vk.vkEndCommandBuffer(self.cmd) != d.VK_SUCCESS)
             return error.EndCommandBufferFailed;
         try submitAndWait(self, vk, dev);
