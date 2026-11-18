@@ -23,13 +23,27 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run sifr framework surface proof");
     run_step.dependOn(&run_cmd.step);
 
-    // Reusable framework module + example app.
-    const cipher_mod = b.createModule(.{
+    // Reusable framework modules + example app. addModule() also registers
+    // these modules for external consumers (build.zig.zon path/url dep):
+    //   const cipher = b.dependency("cipher", .{}).module("cipher");
+    const cipher_mod = b.addModule("cipher", .{
         .root_source_file = b.path("src/cipher.zig"),
         .target = target,
         .optimize = optimize,
     });
     cipher_mod.link_libc = true;
+    const term_mod = b.addModule("term", .{
+        .root_source_file = b.path("src/term_api.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    term_mod.link_libc = true;
+    const audio_mod = b.addModule("audio", .{
+        .root_source_file = b.path("src/audio_api.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    audio_mod.link_libc = true;
 
     const hello_mod = b.createModule(.{
         .root_source_file = b.path("apps/hello.zig"),

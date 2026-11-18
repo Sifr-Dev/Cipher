@@ -57,6 +57,13 @@ pub const Grid = struct {
     saved_cursor: struct { cx: u32 = 0, cy: u32 = 0, fg: u32 = 0, bg: u32 = 0, attrs: Attr = .{} } = .{},
     cursor_visible: bool = true,
     bracketed_paste: bool = false,
+    /// Kitty keyboard protocol progressive-enhancement flags (0 = legacy).
+    kbd_flags: u8 = 0,
+    kbd_stack: [32]u8 = undefined, // per-screen mode stack (this Grid IS the current screen)
+    kbd_stack_len: usize = 0,
+    /// DEC private mode 2026 (synchronized output): hold frame rendering while set.
+    sync_output: bool = false,
+    sync_since_ns: i64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, cols: u32, rows: u32) !Grid {
         return initCapacity(allocator, cols, rows, 10_000);
@@ -424,6 +431,59 @@ pub const Grid = struct {
         self.allocator.destroy(main);
     }
 
+    // ---- kitty keyboard protocol + mode 2026 ----
+    pub const KBD_DISAMBIGUATE: u8 = 1;
+    pub const KBD_EVENT_TYPES: u8 = 2;
+    pub const KBD_ALTERNATE_KEYS: u8 = 4;
+    pub const KBD_REPORT_ALL_KEYS: u8 = 8;
+    pub const KBD_REPORT_TEXT: u8 = 16;
+
+    /// kitty "CSI = flags ; mode u" — mode 1 (or 0/default) replace flags,
+    /// 2 set bits, 3 reset bits.
+    pub fn setKbdFlags(self: *Grid, flags: i32, mode: i32) void {
+        const f: u8 = @intCast(@as(u32, @bitCast(@as(i32, flags))) & 0xFF);
+        switch (mode) {
+            2 => self.kbd_flags |= f,
+            3 => self.kbd_flags &= ~f,
+            else => self.kbd_flags = f,
+        }
+    }
+
+    /// kitty "CSI > flags u" — push current flags onto this screen's stack,
+    /// evicting the oldest when full.
+    pub fn pushKbdFlags(self: *Grid, flags: i32) void {
+        const f: u8 = @intCast(@as(u32, @bitCast(@as(i32, flags))) & 0xFF);
+        if (self.kbd_stack_len < 32) {
+            self.kbd_stack[self.kbd_stack_len] = self.kbd_flags;
+            self.kbd_stack_len += 1;
+        } else {
+            std.mem.copyForwards(u8, self.kbd_stack[0 .. 31], self.kbd_stack[1..32]);
+            self.kbd_stack[31] = self.kbd_flags;
+        }
+        self.kbd_flags = f;
+    }
+
+    /// kitty "CSI < n u" — pop n entries; emptying the stack resets flags.
+    pub fn popKbdFlags(self: *Grid, n: i32) void {
+        var i: i32 = 0;
+        while (i < n and self.kbd_stack_len > 0) : (i += 1) {
+            self.kbd_stack_len -= 1;
+            self.kbd_flags = self.kbd_stack[self.kbd_stack_len];
+        }
+        if (self.kbd_stack_len == 0) self.kbd_flags = 0;
+    }
+
+    /// DEC private mode 2026 — hold frame rendering while set (safety release
+    /// is the renderer's job after a timeout).
+    pub fn setSyncOutput(self: *Grid, on: bool) void {
+        self.sync_output = on;
+        self.sync_since_ns = if (on) blk: {
+            var ts: std.os.linux.timespec = undefined;
+            _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+            break :blk ts.sec * 1_000_000_000 + ts.nsec;
+        } else 0;
+    }
+
     pub fn reset(self: *Grid) !void {
         if (self.alt != null) self.leaveAltScreen();
         for (self.ring) |l| @memset(l.cells, .{});
@@ -459,5 +519,83 @@ pub const Grid = struct {
             try out.append(allocator, '\n');
         }
         return out.toOwnedSlice(allocator);
+    }
+
+    /// Resize the grid, preserving the bottom lines of the visible viewport.
+    /// The alternate screen (and anything where correct preservation would be
+    /// riskier than a reset) resets to a blank grid with the same size.
+    pub fn resize(self: *Grid, allocator: std.mem.Allocator, new_cols: u32, new_rows: u32) !void {
+        if (new_cols == self.cols and new_rows == self.rows) return;
+        const was_alt = self.alt != null;
+        const in_main = self.alt == null;
+        const keep: u32 = if (in_main) @min(new_rows, self.rows) else 0;
+
+        var fresh = try Grid.initCapacity(allocator, new_cols, new_rows, self.scrollback_max);
+        errdefer fresh.deinit();
+
+        if (keep > 0) {
+            const src_start = self.rows - keep;
+            const dst_start = new_rows - keep;
+            var i: u32 = 0;
+            while (i < keep) : (i += 1) {
+                const src = self.lineAt(self.scroll + src_start + i);
+                const dst = fresh.lineAt(dst_start + i);
+                const n = @min(new_cols, self.cols);
+                const src_cells = src.cells;
+                const dst_cells = dst.cells;
+                for (dst_cells, 0..) |*dcell, col| {
+                    dcell.* = if (col < n) src_cells[col] else .{};
+                }
+            }
+            // viewport-aligned counters (fresh has new_rows lines, no history yet beyond those kept)
+            fresh.head = 0;
+            fresh.total = new_rows;
+            fresh.count = new_rows;
+            fresh.scroll = 0;
+        }
+
+        // carry text mode state
+        fresh.cur_fg = self.cur_fg;
+        fresh.cur_bg = self.cur_bg;
+        fresh.cur_attrs = self.cur_attrs;
+        fresh.scroll_top = 0;
+        fresh.scroll_bottom = new_rows - 1;
+        fresh.cx = @min(self.cx, new_cols - 1);
+        fresh.cy = @min(self.cy, new_rows - 1);
+        fresh.pending_wrap = false;
+        fresh.kbd_flags = self.kbd_flags;
+        fresh.kbd_stack_len = self.kbd_stack_len;
+        @memcpy(fresh.kbd_stack[0..fresh.kbd_stack_len], self.kbd_stack[0..self.kbd_stack_len]);
+        fresh.sync_output = self.sync_output;
+        fresh.sync_since_ns = self.sync_since_ns;
+        fresh.cursor_visible = self.cursor_visible;
+        fresh.bracketed_paste = self.bracketed_paste;
+
+        // move fresh ownership into self; free the old allocations
+        const old_ring = self.ring;
+        const old_slab = self.cell_slab;
+        const old_view = self.view_buf;
+        self.ring = fresh.ring;
+        self.cell_slab = fresh.cell_slab;
+        self.view_buf = fresh.view_buf;
+        self.head = fresh.head;
+        self.total = fresh.total;
+        self.count = fresh.count;
+        self.scroll = fresh.scroll;
+        self.scroll_top = fresh.scroll_top;
+        self.scroll_bottom = fresh.scroll_bottom;
+        self.cur_fg = fresh.cur_fg;
+        self.cur_bg = fresh.cur_bg;
+        self.cur_attrs = fresh.cur_attrs;
+        self.cx = fresh.cx;
+        self.cy = fresh.cy;
+        self.pending_wrap = false;
+        self.cols = new_cols;
+        self.rows = new_rows;
+        self.alt = null;
+        allocator.free(old_slab);
+        allocator.free(old_ring);
+        allocator.free(old_view);
+        _ = was_alt; // currently a reset when in alt screen; preserve-later
     }
 };

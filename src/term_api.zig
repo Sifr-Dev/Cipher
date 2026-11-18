@@ -15,3 +15,4 @@ pub const atlas = @import("ui/text/atlas.zig");
 pub const ui = @import("ui/ui.zig");
 pub const widgets = @import("ui/widgets.zig");
 pub const layout = @import("ui/layout.zig");
+pub const kitty = @import("term/kitty.zig");
