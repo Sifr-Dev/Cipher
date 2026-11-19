@@ -57,6 +57,26 @@ fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out: []
                 };
                 n += 1;
             },
+            .shadow_rect => |s| {
+                if (n >= out.len) return error.TooManyQuads;
+                const margin = @max(s.aux[1] * 2.0, @abs(s.aux[3]) + 2.0) + 2.0;
+                const cx = s.rect.x + s.rect.w / 2.0;
+                const cy = s.rect.y + s.rect.h / 2.0;
+                out[n] = .{
+                    .x = s.rect.x - margin,
+                    .y = s.rect.y - margin,
+                    .w = s.rect.w + 2 * margin,
+                    .h = s.rect.h + 2 * margin,
+                    .u0 = 2,
+                    .v0 = 2,
+                    .u1 = 2,
+                    .v1 = 2,
+                    .color = rgba01(s.color),
+                    .aux1 = .{ cx, cy, s.rect.w / 2.0, s.rect.h / 2.0 },
+                    .aux2 = .{ s.aux[0], s.aux[1], s.aux[2], s.aux[3] },
+                };
+                n += 1;
+            },
             .text => |t| {
                 var pen = t.x;
                 const col = rgba01(t.color);

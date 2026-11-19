@@ -88,7 +88,7 @@ fn sceneBoxes(u: *cipher.ui.Ui, f: u64, rt: *cipher.runtime.Runtime) !void {
         const hue = (f / 4 + i *% 37) % 360;
         const rgb = hsv(hue, 0.75, 0.9);
         const col: u32 = 0xFF000000 | (@as(u32, rgb[0]) << 16) | (@as(u32, rgb[1]) << 8) | @as(u32, rgb[2]);
-        try u.addRect(.{ .x = x, .y = y, .w = size, .h = size }, col);
+        try u.addShadowRect(.{ .x = x, .y = y, .w = size, .h = size }, col, 10, 16, 0.4, 5);
     }
     u.endPanel();
 }

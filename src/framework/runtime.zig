@@ -5,6 +5,7 @@
 //!
 //! Run an app with `cipher.runtime.run(MyApp, &app)`.
 const std = @import("std");
+
 const wayland = @import("../os/linux/wayland/wayland_client.zig");
 const device = @import("../gpu/vulkan/device.zig");
 const swapchain_mod = @import("../gpu/vulkan/swapchain.zig");
@@ -87,6 +88,28 @@ pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out
                 };
                 n += 1;
             },
+            .shadow_rect => |s| {
+                if (n >= out.len) return error.TooManyQuads;
+                // Inflate the quad by the shadow falloff so the SDF has room
+                // to feather: margin covers blur + drop offset + AA.
+                const margin = @max(s.aux[1] * 2.0, @abs(s.aux[3]) + 2.0) + 2.0;
+                const cx = s.rect.x + s.rect.w / 2.0;
+                const cy = s.rect.y + s.rect.h / 2.0;
+                out[n] = .{
+                    .x = s.rect.x - margin,
+                    .y = s.rect.y - margin,
+                    .w = s.rect.w + 2 * margin,
+                    .h = s.rect.h + 2 * margin,
+                    .u0 = 2, // sentinel: SDF path in the fragment shader
+                    .v0 = 2,
+                    .u1 = 2,
+                    .v1 = 2,
+                    .color = rgba01(s.color),
+                    .aux1 = .{ cx, cy, s.rect.w / 2.0, s.rect.h / 2.0 },
+                    .aux2 = .{ s.aux[0], s.aux[1], s.aux[2], s.aux[3] },
+                };
+                n += 1;
+            },
             .text => |t| {
                 var pen = t.x;
                 const col = rgba01(t.color);
@@ -130,12 +153,19 @@ pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out
 /// or headless/driverless sessions).
 fn rasterQuad(px: []u32, fb_w: u32, fb_h: u32, q: text_gpu.Quad, atlas: []const u8, atlas_w: u32, atlas_h: u32) void {
     const solid = q.u0 == 0 and q.v0 == 0 and q.u1 == 0 and q.v1 == 0;
+    // Hardware path has real SDF rounded+shadow; the CPU path fills the inner
+    // box only (shadow is dropped, corners square) — compat-only, not shipped.
+    const sdf = q.u0 == 2 and q.v0 == 2;
+    const qx = if (sdf) q.aux1[0] - q.aux1[2] else q.x;
+    const qy = if (sdf) q.aux1[1] - q.aux1[3] else q.y;
+    const qw = if (sdf) q.aux1[2] * 2 else q.w;
+    const qh = if (sdf) q.aux1[3] * 2 else q.h;
     const fw = @as(f32, @floatFromInt(fb_w));
     const fh = @as(f32, @floatFromInt(fb_h));
-    const fx0 = @max(0.0, q.x);
-    const fy0 = @max(0.0, q.y);
-    const fx1 = @min(fw, q.x + q.w);
-    const fy1 = @min(fh, q.y + q.h);
+    const fx0 = @max(0.0, qx);
+    const fy0 = @max(0.0, qy);
+    const fx1 = @min(fw, qx + qw);
+    const fy1 = @min(fh, qy + qh);
     if (fx1 <= fx0 or fy1 <= fy0) return;
     const ix0: i32 = @intFromFloat(@floor(fx0));
     const iy0: i32 = @intFromFloat(@floor(fy0));
@@ -213,6 +243,12 @@ pub fn uriListToPaths(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 
 /// The framework runtime. One per process; owns connection, window, GPU
 /// pipelines, UI state, input, clipboard, and the frame loop.
+fn nowNs() i64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    return ts.sec * 1_000_000_000 + ts.nsec;
+}
+
 pub const Runtime = struct {
     opts: Options,
     conn: *wayland.Connection,
@@ -329,9 +365,7 @@ pub const Runtime = struct {
         self.pending_events = .empty;
         self.events_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         self.quads_buf = try std.heap.page_allocator.alloc(text_gpu.Quad, 65536);
-        self.extra_quads = null;
-
-        const compositor_g = self.conn.findGlobal("wl_compositor") orelse return error.NoCompositor;
+        self.extra_quads = null; const compositor_g = self.conn.findGlobal("wl_compositor") orelse return error.NoCompositor;
         const shm_g = self.conn.findGlobal("wl_shm") orelse return error.NoShm;
         const wm_base_g = self.conn.findGlobal("xdg_wm_base") orelse return error.NoWmBase;
         const seat_g = self.conn.findGlobal("wl_seat") orelse return error.NoSeat;
@@ -380,6 +414,7 @@ pub const Runtime = struct {
             wayland.surfaceSetBufferScale(self.conn, self.surface, @intCast(self.scale));
         }
         wayland.surfaceCommit(self.conn, self.surface);
+        if (std.c.getenv("CIPHER_TRACE_STARTUP") != null) std.debug.print("cipher[trace]: surface committed t={d}ms\n", .{@divTrunc(nowNs(), 1000000)});
 
         // Blocking wait for the first configure (socket still blocking).
         var configured = false;
@@ -388,9 +423,11 @@ pub const Runtime = struct {
             _ = try self.conn.waitDispatch(-1);
             for (self.conn.events.items) |*event| {
                 if (debug_init_events) std.debug.print("cipher: event sender={d} opcode={d} len={d}\n", .{ event.sender, event.opcode, event.payload().len });
+                if (std.c.getenv("CIPHER_TRACE_STARTUP") != null) std.debug.print("cipher[trace]: event sender={d} opcode={d} len={d} t={d}ms\n", .{ event.sender, event.opcode, event.payload().len, nowNs() });
                 if (event.sender == self.xdg_surface and event.opcode == 0) {
                     wayland.xdgSurfaceAckConfigure(self.conn, self.xdg_surface, event.read32(0));
                     configured = true;
+                    if (std.c.getenv("CIPHER_TRACE_STARTUP") != null) std.debug.print("cipher[trace]: configured t={d}ms\n", .{@divTrunc(nowNs(), 1000000)});
                 }
                 try self.dispatchInitEvent(event);
             }
@@ -401,6 +438,7 @@ pub const Runtime = struct {
         // not during the configure burst — umbriel kills the connection when
         // clients register objects during its configure sequence.
         try self.makeShmObjects();
+        if (std.c.getenv("CIPHER_TRACE_STARTUP") != null) std.debug.print("cipher[trace]: shm objects t={d}ms\n", .{@divTrunc(nowNs(), 1000000)});
 
         // GPU + font + UI (all optional; software fallback presents clear color).
         const force_sw = std.c.getenv("CIPHER_FORCE_SOFTWARE") != null;
@@ -468,7 +506,9 @@ pub const Runtime = struct {
                 }
             }
         }
-        std.debug.print("cipher: render path = {s}\n", .{if (self.swapchain != null) "vulkan-wsi" else if (self.gt != null) "vulkan-gpu-ui-shm" else "software-shm"});
+        std.debug.print("cipher: render path = {s}\n", .{if (self.swapchain != null and self.gt != null) "vulkan-wsi" else if (self.gt != null) "vulkan-gpu-ui-shm" else "software-shm"});
+        if (self.swapchain != null and self.gt == null)
+            std.debug.print("cipher: WARNING: GPU text pipeline unavailable; presenting via CPU raster (GPU path disabled)\n", .{});
 
         self.conn.setNonBlocking();
         return self;
@@ -492,6 +532,24 @@ pub const Runtime = struct {
         }
         if (self.ids.seat != null and event.sender == self.ids.seat.? and event.opcode == 0) {
             try self.onSeatCapabilities(event.read32(0));
+        }
+        if (event.sender == self.toplevel) {
+            switch (event.opcode) {
+                0 => { // configure w,h,states (logical). Steady-state dispatch does the same.
+                    const w = event.readI32(0);
+                    const h = event.readI32(1);
+                    if (w > 0 and h > 0) {
+                        const lw: u32 = @intCast(w);
+                        const lh: u32 = @intCast(h);
+                        if (lw == self.logical_w and lh == self.logical_h) return;
+                        self.resize(lw, lh) catch |e| {
+                            std.debug.print("cipher: resize failed: {s}\n", .{@errorName(e)});
+                        };
+                    }
+                },
+                else => {},
+            }
+            return;
         }
         // wl_keyboard.keymap is parsed client-side via libxkbcommon; nothing to do.
     }
@@ -1066,8 +1124,10 @@ pub const Runtime = struct {
         self.pending_events.clearRetainingCapacity();
         _ = self.events_arena.reset(.free_all);
 
-        if (self.swapchain == null) {
+        if (self.swapchain == null or self.gt == null) {
             // attach + damage + commit
+            // (gt==null means no GPU text pipeline: present via CPU raster
+            // instead of showing a permanently stale window)
             wayland.surfaceAttach(self.conn, self.surface, self.buffer, 0, 0);
             wayland.surfaceDamage(self.conn, self.surface, 0, 0, @intCast(self.logical_w), @intCast(self.logical_h));
             wayland.surfaceCommit(self.conn, self.surface);

@@ -22,12 +22,17 @@ pub const Quad = struct {
     u1: f32,
     v1: f32,
     color: [4]f32,
+    /// SDF shadow-rect auxiliaries; all zeros = normal quad.
+    aux1: [4]f32 = .{ 0, 0, 0, 0 },
+    aux2: [4]f32 = .{ 0, 0, 0, 0 },
 };
 
 const Vertex = extern struct {
-    pos: [2]f32,
-    uv: [2]f32,
-    color: [4]f32,
+    pos: [2]f32,   // 0
+    uv: [2]f32,    // 8
+    color: [4]f32, // 16
+    aux1: [4]f32,  // 32  SDF rect: (center.xy, half-size.xy)
+    aux2: [4]f32,  // 48  SDF rect: (radius, blur, shadow_alpha, drop_y)
 };
 
 /// Must match layout(push_constant) in text.vert / text.frag.
@@ -35,7 +40,11 @@ pub const PushConstants = extern struct {
     extent: [4]f32, // xy = width/height in pixels
 };
 
-const MAX_QUADS: usize = 65536; // a 200x60 terminal = 12k cells -> rects + glyph quads
+// 16384 quads covers a 200x60 terminal (12k cells) plus UI; the host-visible
+// vertex buffer stays ~6 MB. NV drivers exclude host-visible types from
+// memoryTypeBits beyond a small mappable window — larger VBs fail with
+// NoSuitableMemoryType (this was MAX_QUADS=65536 -> 25 MB and broke gt init).
+const MAX_QUADS: usize = 16384;
 
 pub const GpuText = struct {
     width: u32,
@@ -119,7 +128,10 @@ pub const GpuText = struct {
         const rcs = vk.vkCreateBuffer(dev_handle, &binfo, null, &buf);
         if (rcs != d.VK_SUCCESS)
             return error.CreateBufferFailed;
-        var reqs: d.VkMemoryRequirements = undefined;
+        // Zeroed, not undefined: the driver writes these, but an uninitialized
+        // local is undefined behavior in Zig and has produced invalid memory
+        // requirements on some driver stacks.
+        var reqs: d.VkMemoryRequirements = .{ .size = 0, .alignment = 0, .memoryTypeBits = 0, ._pad = 0 };
         vk.vkGetBufferMemoryRequirements(dev_handle, buf, &reqs);
         const mt = try findMemoryType(vk, dev, reqs.memoryTypeBits, d.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | d.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         const ainfo = d.VkMemoryAllocateInfo{
@@ -487,6 +499,8 @@ pub const GpuText = struct {
             .{ .location = 0, .binding = 0, .format = d.VK_FORMAT_R32G32_SFLOAT, .offset = 0 },
             .{ .location = 1, .binding = 0, .format = d.VK_FORMAT_R32G32_SFLOAT, .offset = 8 },
             .{ .location = 2, .binding = 0, .format = d.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 16 },
+            .{ .location = 3, .binding = 0, .format = d.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 32 },
+            .{ .location = 4, .binding = 0, .format = d.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 48 },
         };
         const vi = d.VkPipelineVertexInputStateCreateInfo{
             .sType = d.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -494,7 +508,7 @@ pub const GpuText = struct {
             .flags = 0,
             .vertexBindingDescriptionCount = 1,
             .pVertexBindingDescriptions = @ptrCast(&vb_binding),
-            .vertexAttributeDescriptionCount = 3,
+            .vertexAttributeDescriptionCount = 5,
             .pVertexAttributeDescriptions = @ptrCast(&vb_attrs),
         };
         const ia = d.VkPipelineInputAssemblyStateCreateInfo{
@@ -542,12 +556,12 @@ pub const GpuText = struct {
             .alphaToOneEnable = 0,
         };
         const cba = d.VkPipelineColorBlendAttachmentState{
-            .blendEnable = 0,
-            .srcColorBlendFactor = 0,
-            .dstColorBlendFactor = 0,
-            .colorBlendOp = 0,
-            .srcAlphaBlendFactor = 0,
-            .dstAlphaBlendFactor = 0,
+            .blendEnable = 1,
+            .srcColorBlendFactor = 1, // VK_BLEND_FACTOR_ONE (premultiplied src)
+            .dstColorBlendFactor = 7, // VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+            .colorBlendOp = 0,        // VK_BLEND_OP_ADD
+            .srcAlphaBlendFactor = 1, // VK_BLEND_FACTOR_ONE
+            .dstAlphaBlendFactor = 7, // VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
             .alphaBlendOp = 0,
             .colorWriteMask = d.VK_COLOR_COMPONENT_R_BIT | d.VK_COLOR_COMPONENT_G_BIT | d.VK_COLOR_COMPONENT_B_BIT | d.VK_COLOR_COMPONENT_A_BIT,
         };
@@ -751,12 +765,12 @@ pub const GpuText = struct {
             const x1 = q.x + q.w;
             const y1 = q.y + q.h;
             const quad_verts = [6]Vertex{
-                .{ .pos = .{ q.x, q.y }, .uv = .{ q.u0, q.v0 }, .color = q.color },
-                .{ .pos = .{ x1, q.y }, .uv = .{ q.u1, q.v0 }, .color = q.color },
-                .{ .pos = .{ x1, y1 }, .uv = .{ q.u1, q.v1 }, .color = q.color },
-                .{ .pos = .{ q.x, q.y }, .uv = .{ q.u0, q.v0 }, .color = q.color },
-                .{ .pos = .{ x1, y1 }, .uv = .{ q.u1, q.v1 }, .color = q.color },
-                .{ .pos = .{ q.x, y1 }, .uv = .{ q.u0, q.v1 }, .color = q.color },
+                .{ .pos = .{ q.x, q.y }, .uv = .{ q.u0, q.v0 }, .color = q.color, .aux1 = q.aux1, .aux2 = q.aux2 },
+                .{ .pos = .{ x1, q.y }, .uv = .{ q.u1, q.v0 }, .color = q.color, .aux1 = q.aux1, .aux2 = q.aux2 },
+                .{ .pos = .{ x1, y1 }, .uv = .{ q.u1, q.v1 }, .color = q.color, .aux1 = q.aux1, .aux2 = q.aux2 },
+                .{ .pos = .{ q.x, q.y }, .uv = .{ q.u0, q.v0 }, .color = q.color, .aux1 = q.aux1, .aux2 = q.aux2 },
+                .{ .pos = .{ x1, y1 }, .uv = .{ q.u1, q.v1 }, .color = q.color, .aux1 = q.aux1, .aux2 = q.aux2 },
+                .{ .pos = .{ q.x, y1 }, .uv = .{ q.u0, q.v1 }, .color = q.color, .aux1 = q.aux1, .aux2 = q.aux2 },
             };
             @memcpy(verts[i * 6 ..][0..6], &quad_verts);
         }

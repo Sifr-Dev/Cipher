@@ -28,7 +28,10 @@ construction) is ~2.0–2.3× lower than nanoui's on identical scenes, plus
 ~15–150× lower encode CPU. Their encode number is the cost of software
 Gaussian shadows + blend rasterization; ours is a direct quad build.
 
-**Does not — stated plainly:**
+**Does not — stated plainly (owner correction applied, 2026-11-19):**
+0. **This host has no CPU graphics output.** All presentation is GPU; the
+   CPU-raster comparisons above are compute-only evidence. Presentation
+   claims require GPU timestamps; until then, none are made.
 1. **Different work per scene.** Their labels carry real text machinery
    (grapheme clusters, wrap caches, composite glyphs) — ours are single-line
    plain labels. Their boxes include rounded corners and 8-sample Gaussian
@@ -44,6 +47,28 @@ Gaussian shadows + blend rasterization; ours is a direct quad build.
    raster) is unmeasured in both suites on identical drivers/compositors.
 5. **One machine.** Ryzen 7 7435HS only. No Apple silicon, no Intel iGPU, no
    Mutter/KWin yet.
+
+## The comparison axes that are valid on this host
+
+This machine's CPU has **no graphics output** (Ryzen 7 7435HS) — every frame
+presents through the RTX 4060 (Vulkan/WSI). Therefore:
+
+- **Valid comparisons** (CPU compute is CPU in both suites): layout, widget
+  build, and quad/command encoding — the `build/layout/encode` columns above.
+- **Invalid as product claims**: any CPU-rasterized presentation comparison.
+  The software-shm path exists in cipher purely as a portability fallback for
+  machines without a Vulkan ICD; on this host it is not a shippable mode, is
+  unmeasured, and is never claimed. Nanoui's Linux "frame CPU" reproduced on
+  this host via their CPU-raster path, but that path is not the one this host
+  ships or displays.
+- **Unmeasured both ways until timestamps land**: the GPU present path. Our
+  `render_ms` is vsync-wait dominated; nanoui's Linux GPU path (GTK+EGL into
+  whatever GL the driver gives) has never been benchmarked on identical
+  scenes here either. Neither side has a render-path win claim today.
+- **The `2x` speedup in the table is capacity evidence, not a product
+  metric** — it shows our layout/build/quad pipeline is cheap on shared CPU;
+  it does not imply faster frames on screen, because presentation is GPU and
+  unmeasured for both.
 
 ## How to reproduce
 

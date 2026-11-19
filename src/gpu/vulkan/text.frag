@@ -2,21 +2,51 @@
 
 layout(location = 0) in vec2 uv;
 layout(location = 1) in vec4 color;
+layout(location = 2) in vec4 aux1;
+layout(location = 3) in vec4 aux2;
 
 layout(set = 0, binding = 0) uniform sampler2D atlas; // R8 glyph coverage
 
 layout(push_constant) uniform PC {
-    vec4 extent;
+    vec4 extent;   // framebuffer width, height in pixels (xy used)
 } pc;
 
 layout(location = 0) out vec4 outColor;
 
+float sdRoundBox(vec2 p, vec2 b, float r) {
+    vec2 q = abs(p) - b + vec2(r);
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
 void main() {
+    // SDF rounded-shadow rect: aux1 = (center.xy, half-size.xy), aux2 = (radius, blur, shadow alpha, drop-y)
+    if (uv == vec2(2.0, 2.0)) {
+        // Our space is y-down and this viewport maps y=0 (top) to NDC -1,
+        // which is framebuffer row 0 — gl_FragCoord.y == our y (no flip).
+        vec2 fragpos = gl_FragCoord.xy;
+        vec2 local = fragpos - aux1.xy;
+        vec2 b = aux1.zw;
+        float radius = aux2.x;
+        float blur = max(aux2.y, 1.0);
+        float shadowA = aux2.z;
+        float dropY = aux2.w;
+        float d = sdRoundBox(local, b, radius);
+        float edge = 1.5;
+        float fillA = 1.0 - smoothstep(-edge, edge, d);
+        float ds = sdRoundBox(local - vec2(0.0, dropY), b, radius);
+        float s = 1.0 - smoothstep(0.0, blur, ds);
+        float shadow = shadowA * s * s;
+        // Premultiplied src-over of fill over shadow
+        vec3 c = color.rgb * fillA + vec3(0.0) * shadow * (1.0 - fillA);
+        float a = fillA + shadow * (1.0 - fillA);
+        outColor = vec4(c.b, c.g, c.r, a);
+        return;
+    }
     float a = texture(atlas, uv).r;
     // Void background #04060B blended with the vertex color by coverage.
     // Solid rects sample the reserved white texel (a == 1) -> exact color.
     vec3 bg = vec3(4.0 / 255.0, 6.0 / 255.0, 11.0 / 255.0);
     vec3 c = mix(bg, color.rgb, a);
-    // Store swizzled BGRA so the host copy is directly wl_shm ARGB8888.
+    // Premultiplied alpha (blend pipeline: ONE, ONE_MINUS_SRC_ALPHA).
     outColor = vec4(c.b, c.g, c.r, 1.0);
 }
