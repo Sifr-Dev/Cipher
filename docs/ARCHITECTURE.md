@@ -44,6 +44,21 @@ dlopen/dlsym modules). Hardware tests run against whatever ICD is active;
 Evidence artifacts: `/tmp/sifr_frame.ppm`, `/tmp/sifr_text.ppm`,
 `/tmp/sifr_gpu_text.ppm`.
 
+### Snapshot gate
+
+Rendering regressions are caught by a deterministic software-shm snapshot:
+`CIPHER_FORCE_SOFTWARE=1 CIPHER_DUMP_FRAME=<frame.ppm> CIPHER_MAX_FRAMES=3`
+produces a reference frame (same font, same machine ⇒ byte-identical hash
+across runs). `zig build snapshot` regenerates the frame and checks it
+against `tests/golden/hello.sha256` with `snapdiff check`; exit 0 = match.
+The golden is font-rasterizer specific — if you change the font, rasterizer,
+or theme defaults, regenerate it with `snapdiff write` and eyeball the frame
+before committing. A mismatch fails the build. Verified 2026-11-19: the gate
+catches a font swap (exits 1) and passes after revert (exits 0).
+
+Requires a Wayland session (the software path still commits to wl_shm);
+it is a local gate, not a headless CI step.
+
 ## Known limitations
 
 - `vkDestroyDevice`/`vkDestroyInstance` crash in the NVIDIA ICD teardown path;
