@@ -6,6 +6,7 @@ const std = @import("std");
 const layout = @import("layout.zig");
 const atlas_mod = @import("text/atlas.zig");
 const input = @import("../framework/input.zig");
+const motion_mod = @import("motion.zig");
 
 pub const DrawCmd = union(enum) {
     rect: struct { rect: layout.Rect, color: u32 },
@@ -27,6 +28,8 @@ pub const COLOR_TEXT_DIM: u32 = 0xFF8A93A6;
 pub const COLOR_FOCUS_RING: u32 = 0xFF659EFF; // accent — keyboard focus indicator
 
 pub const Ui = struct {
+    /// Spring/tween animation state; advanced by begin() once per frame.
+    motion: motion_mod.Motion,
     arena: std.heap.ArenaAllocator,
     atlas: *atlas_mod.TextAtlas,
     root: *layout.Node = undefined,
@@ -82,6 +85,7 @@ pub const Ui = struct {
 
     pub fn init(base: std.mem.Allocator, atlas: *atlas_mod.TextAtlas) Ui {
         return .{
+            .motion = motion_mod.Motion.init(base),
             .arena = std.heap.ArenaAllocator.init(base),
             .atlas = atlas,
             .stack = .empty,
@@ -96,6 +100,20 @@ pub const Ui = struct {
         self.states.deinit(self.base_allocator);
         self.arena.deinit();
         self.prev_rects.deinit();
+        self.motion.deinit();
+    }
+
+    /// Animated value approaching `target` with spring physics. First call
+    /// snaps; retargeting mid-animation carries value + velocity over.
+    /// `id` must be stable across frames for the animation to persist.
+    pub fn motionSpring(self: *Ui, id: u64, target: f32, spring: motion_mod.Spring) f32 {
+        return self.motion.spring(id, target, spring);
+    }
+
+    /// Animated value moving from its current position to `target` over
+    /// `duration` seconds with a cubic Bézier ease.
+    pub fn motionTween(self: *Ui, id: u64, target: f32, duration: f32, curve: motion_mod.CubicBezier) f32 {
+        return self.motion.tween(id, target, duration, curve);
     }
 
     /// Persistent per-widget state slot (survives the per-frame arena reset).
@@ -161,6 +179,7 @@ pub const Ui = struct {
     }
 
     pub fn begin(self: *Ui, w: f32, h: f32, mx: f32, my: f32, mdown: bool, mpressed: bool, scale: f32) !void {
+        self.motion.beginFrame();
         _ = self.arena.reset(.free_all);
         self.scale = if (scale > 0) scale else 1;
         self.stack = .empty;
