@@ -10,6 +10,9 @@ const input = @import("../framework/input.zig");
 pub const DrawCmd = union(enum) {
     rect: struct { rect: layout.Rect, color: u32 },
     text: struct { x: f32, baseline: f32, str: []const u8, color: u32 },
+    /// Rounded rect with drop shadow (SDF in the fragment shader).
+    /// aux = (radius, blur, shadow_alpha, drop_offset_y).
+    shadow_rect: struct { rect: layout.Rect, color: u32, aux: [4]f32 },
 };
 
 // Brand tokens: void #04060B, surface #0A0D13, accent #659EFF, hairline #1C2434.
@@ -108,6 +111,16 @@ pub const Ui = struct {
     /// Append a raw rect draw command (for custom widgets).
     pub fn addRect(self: *Ui, r: layout.Rect, color: u32) !void {
         try self.cmds.append(self.allocator(), .{ .rect = .{ .rect = self.scaledRect(r), .color = color } });
+    }
+
+    /// Append a raw rounded rect + drop shadow draw command.
+    /// radius/blur in pixels; shadow_alpha 0..1; drop_y is the vertical offset.
+    pub fn addShadowRect(self: *Ui, r: layout.Rect, color: u32, radius: f32, blur: f32, shadow_alpha: f32, drop_y: f32) !void {
+        try self.cmds.append(self.allocator(), .{ .shadow_rect = .{
+            .rect = self.scaledRect(r),
+            .color = color,
+            .aux = .{ radius * self.scale, blur * self.scale, shadow_alpha, drop_y * self.scale },
+        } });
     }
 
     /// Append a raw text draw command (for custom widgets).

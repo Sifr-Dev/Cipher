@@ -135,6 +135,7 @@ test "ui: panel+label+button emit draw commands; button click hit-tests across f
     for (ui.drawCmds()) |c| {
         switch (c) {
             .rect => rects += 1,
+            .shadow_rect => rects += 1,
             .text => |t| {
                 texts += 1;
                 if (std.mem.eql(u8, t.str, "OK")) saw_ok = true;

@@ -5,6 +5,7 @@
 //!
 //! Run an app with `cipher.runtime.run(MyApp, &app)`.
 const std = @import("std");
+
 const wayland = @import("../os/linux/wayland/wayland_client.zig");
 const device = @import("../gpu/vulkan/device.zig");
 const swapchain_mod = @import("../gpu/vulkan/swapchain.zig");
@@ -87,6 +88,28 @@ pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out
                 };
                 n += 1;
             },
+            .shadow_rect => |s| {
+                if (n >= out.len) return error.TooManyQuads;
+                // Inflate the quad by the shadow falloff so the SDF has room
+                // to feather: margin covers blur + drop offset + AA.
+                const margin = @max(s.aux[1] * 2.0, @abs(s.aux[3]) + 2.0) + 2.0;
+                const cx = s.rect.x + s.rect.w / 2.0;
+                const cy = s.rect.y + s.rect.h / 2.0;
+                out[n] = .{
+                    .x = s.rect.x - margin,
+                    .y = s.rect.y - margin,
+                    .w = s.rect.w + 2 * margin,
+                    .h = s.rect.h + 2 * margin,
+                    .u0 = 2, // sentinel: SDF path in the fragment shader
+                    .v0 = 2,
+                    .u1 = 2,
+                    .v1 = 2,
+                    .color = rgba01(s.color),
+                    .aux1 = .{ cx, cy, s.rect.w / 2.0, s.rect.h / 2.0 },
+                    .aux2 = .{ s.aux[0], s.aux[1], s.aux[2], s.aux[3] },
+                };
+                n += 1;
+            },
             .text => |t| {
                 var pen = t.x;
                 const col = rgba01(t.color);
@@ -123,6 +146,29 @@ pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out
     return offset + n;
 }
 
+fn roundedBoxDistance(x: f32, y: f32, half_w: f32, half_h: f32, radius_in: f32) f32 {
+    const radius = std.math.clamp(radius_in, 0, @min(half_w, half_h));
+    const qx = @abs(x) - half_w + radius;
+    const qy = @abs(y) - half_h + radius;
+    return @sqrt(@max(qx, 0) * @max(qx, 0) + @max(qy, 0) * @max(qy, 0)) + @min(@max(qx, qy), 0) - radius;
+}
+
+fn smoothStep(edge0: f32, edge1: f32, x: f32) f32 {
+    const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0, 1);
+    return t * t * (3 - 2 * t);
+}
+
+fn roundedBoxCoverage(x: f32, y: f32, half_w: f32, half_h: f32, radius: f32) f32 {
+    const d = roundedBoxDistance(x, y, half_w, half_h, radius);
+    return 1 - smoothStep(-1.5, 1.5, d);
+}
+
+fn shadowCoverage(x: f32, y: f32, half_w: f32, half_h: f32, radius: f32, blur: f32) f32 {
+    const d = roundedBoxDistance(x, y, half_w, half_h, radius);
+    const s = 1 - smoothStep(0, @max(blur, 1), d);
+    return s * s;
+}
+
 /// CPU rasterizer for one GPU-shaped quad (solid rect when the UVs are the
 /// reserved (0,0)-(0,0) white texel, else an atlas-sampled glyph quad).
 /// Blends source-over into the ARGB8888 (0xAARRGGBB) shm framebuffer.
@@ -130,6 +176,9 @@ pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out
 /// or headless/driverless sessions).
 fn rasterQuad(px: []u32, fb_w: u32, fb_h: u32, q: text_gpu.Quad, atlas: []const u8, atlas_w: u32, atlas_h: u32) void {
     const solid = q.u0 == 0 and q.v0 == 0 and q.u1 == 0 and q.v1 == 0;
+    // Rounded rectangles use signed-distance coverage. Sampling the atlas
+    // with sentinel UVs would instead create an opaque square.
+    const sdf = q.u0 == 2 and q.v0 == 2 and q.u1 == 2 and q.v1 == 2;
     const fw = @as(f32, @floatFromInt(fb_w));
     const fh = @as(f32, @floatFromInt(fb_h));
     const fx0 = @max(0.0, q.x);
@@ -151,35 +200,94 @@ fn rasterQuad(px: []u32, fb_w: u32, fb_h: u32, q: text_gpu.Quad, atlas: []const 
     while (py < iy1) : (py += 1) {
         var pxi = ix0;
         while (pxi < ix1) : (pxi += 1) {
-            var cov: u32 = 255;
-            if (!solid) {
-                const u = (@as(f32, @floatFromInt(pxi)) + 0.5 - q.x) / q.w * (q.u1 - q.u0) + q.u0;
-                const v = (@as(f32, @floatFromInt(py)) + 0.5 - q.y) / q.h * (q.v1 - q.v0) + q.v0;
-                const tu: f32 = std.math.clamp(u, 0.0, @as(f32, @floatFromInt(atlas_w - 1)) / afw);
-                const tv: f32 = std.math.clamp(v, 0.0, @as(f32, @floatFromInt(atlas_h - 1)) / afh);
-                const tx: u32 = @intFromFloat(@floor(tu * afw));
-                const ty: u32 = @intFromFloat(@floor(tv * afh));
-                cov = atlas[@as(usize, ty) * @as(usize, atlas_w) + tx];
-                if (cov == 0) continue;
-            }
-            const sa = @as(f32, @floatFromInt(cov)) / 255.0 * ca;
-            if (sa <= 0) continue;
             const idx: usize = @as(usize, @intCast(py)) * @as(usize, fb_w) + @as(usize, @intCast(pxi));
             const dst = px[idx];
             const da = @as(f32, @floatFromInt((dst >> 24) & 0xFF)) / 255.0;
             const dr = @as(f32, @floatFromInt((dst >> 16) & 0xFF)) / 255.0;
             const dg = @as(f32, @floatFromInt((dst >> 8) & 0xFF)) / 255.0;
             const db = @as(f32, @floatFromInt(dst & 0xFF)) / 255.0;
+            var sr = cr;
+            var sg = cg;
+            var sb = cb;
+            var sa = ca;
+            if (sdf) {
+                const x = @as(f32, @floatFromInt(pxi)) + 0.5;
+                const y = @as(f32, @floatFromInt(py)) + 0.5;
+                const fill_a = roundedBoxCoverage(x - q.aux1[0], y - q.aux1[1], q.aux1[2], q.aux1[3], q.aux2[0]);
+                const shadow_a = shadowCoverage(x - q.aux1[0], y - q.aux1[1] - q.aux2[3], q.aux1[2], q.aux1[3], q.aux2[0], q.aux2[1]) * q.aux2[2];
+                // Coverage is outside the fill/shadow alpha product, just
+                // as in the fragment shader's premultiplied composition.
+                sa = fill_a * ca + shadow_a * (1 - fill_a * ca);
+                const color_weight = if (sa > 0) fill_a * ca / sa else 0;
+                sr *= color_weight;
+                sg *= color_weight;
+                sb *= color_weight;
+            } else {
+                var cov: u32 = 255;
+                if (!solid) {
+                    const u = (@as(f32, @floatFromInt(pxi)) + 0.5 - q.x) / q.w * (q.u1 - q.u0) + q.u0;
+                    const v = (@as(f32, @floatFromInt(py)) + 0.5 - q.y) / q.h * (q.v1 - q.v0) + q.v0;
+                    const tu: f32 = std.math.clamp(u, 0.0, @as(f32, @floatFromInt(atlas_w - 1)) / afw);
+                    const tv: f32 = std.math.clamp(v, 0.0, @as(f32, @floatFromInt(atlas_h - 1)) / afh);
+                    const tx: u32 = @intFromFloat(@floor(tu * afw));
+                    const ty: u32 = @intFromFloat(@floor(tv * afh));
+                    cov = atlas[@as(usize, ty) * @as(usize, atlas_w) + tx];
+                }
+                sa *= @as(f32, @floatFromInt(cov)) / 255.0;
+            }
+            if (sa <= 0) continue;
             const oa = sa + da * (1 - sa);
-            const orr = if (oa > 0) (cr * sa + dr * da * (1 - sa)) / oa else 0;
-            const ogr = if (oa > 0) (cg * sa + dg * da * (1 - sa)) / oa else 0;
-            const obl = if (oa > 0) (cb * sa + db * da * (1 - sa)) / oa else 0;
+            const orr = if (oa > 0) (sr * sa + dr * da * (1 - sa)) / oa else 0;
+            const ogr = if (oa > 0) (sg * sa + dg * da * (1 - sa)) / oa else 0;
+            const obl = if (oa > 0) (sb * sa + db * da * (1 - sa)) / oa else 0;
             px[idx] = (@as(u32, @intFromFloat(@round(oa * 255))) << 24) |
                 (@as(u32, @intFromFloat(@round(orr * 255))) << 16) |
                 (@as(u32, @intFromFloat(@round(ogr * 255))) << 8) |
                 @as(u32, @intFromFloat(@round(obl * 255)));
         }
     }
+}
+
+test "software rounded rectangle renders corners, shadow, and fill alpha" {
+    var px: [100 * 100]u32 = @splat(0xFF04060B);
+    const q = text_gpu.Quad{
+        .x = 10,
+        .y = 10,
+        .w = 80,
+        .h = 80,
+        .u0 = 2,
+        .v0 = 2,
+        .u1 = 2,
+        .v1 = 2,
+        .color = .{ 1, 0.5, 0, 0.5 },
+        .aux1 = .{ 50, 50, 20, 20 },
+        .aux2 = .{ 8, 10, 0.5, 4 },
+    };
+    rasterQuad(&px, 100, 100, q, &.{0}, 1, 1);
+    const bg = 0xFF04060B;
+    // Outside the rounded corner and its feather stays clear; the center
+    // has the 50% fill.
+    try std.testing.expectEqual(bg, px[25 * 100 + 25]);
+    const center = px[50 * 100 + 50];
+    // The integer-pixel edge sits within the shader's bounded AA feather.
+    try std.testing.expectEqual(@as(u32, 0xFF814103), px[49 * 100 + 49]);
+    // At the center of the integer-pixel rounded rectangle, shader and CPU
+    // antialias coverage is 0.5. Preserve the exact CPU reference value.
+    try std.testing.expectEqual(@as(u32, 0xFF814103), center);
+    // A feathered shadow remains beyond the fill's lower edge.
+    try std.testing.expect(px[77 * 100 + 50] != bg);
+    try std.testing.expect(px[77 * 100 + 50] != center);
+    // Transparent fill does not suppress its requested shadow. Test on a
+    // clean buffer, not on the previous fill (frames are cleared each time).
+    var clean: [100 * 100]u32 = @splat(0xFF04060B);
+    var transparent = q;
+    transparent.color[3] = 0;
+    rasterQuad(&clean, 100, 100, transparent, &.{0}, 1, 1);
+    try std.testing.expect(clean[77 * 100 + 50] != bg);
+    // Only the black shadow remains; it darkens but cannot erase the opaque
+    // background's alpha.
+    try std.testing.expectEqual(@as(u32, 0xFF000000), clean[50 * 100 + 50] & 0xFF000000);
+    try std.testing.expect((clean[50 * 100 + 50] & 0x00FFFFFF) < (bg & 0x00FFFFFF));
 }
 
 /// Decode a text/uri-list payload into newline-separated local paths
@@ -213,6 +321,12 @@ pub fn uriListToPaths(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 
 /// The framework runtime. One per process; owns connection, window, GPU
 /// pipelines, UI state, input, clipboard, and the frame loop.
+fn nowNs() i64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    return ts.sec * 1_000_000_000 + ts.nsec;
+}
+
 pub const Runtime = struct {
     opts: Options,
     conn: *wayland.Connection,
@@ -282,6 +396,13 @@ pub const Runtime = struct {
     events_arena: std.heap.ArenaAllocator,
     app_ref: ?*const App = null,
 
+    timing_init: bool = false,
+    timing_on: bool = false,
+    timing_count: u64 = 0,
+    t_build_ns: u64 = 0,
+    t_layout_ns: u64 = 0,
+    t_encode_ns: u64 = 0,
+    t_render_ns: u64 = 0,
     pub fn init(opts: Options) !Runtime {
         var self: Runtime = @import("../core/types.zig").zeroed(Runtime);
         self.opts = opts;
@@ -373,6 +494,7 @@ pub const Runtime = struct {
             wayland.surfaceSetBufferScale(self.conn, self.surface, @intCast(self.scale));
         }
         wayland.surfaceCommit(self.conn, self.surface);
+        if (std.c.getenv("CIPHER_TRACE_STARTUP") != null) std.debug.print("cipher[trace]: surface committed t={d}ms\n", .{@divTrunc(nowNs(), 1000000)});
 
         // Blocking wait for the first configure (socket still blocking).
         var configured = false;
@@ -381,9 +503,11 @@ pub const Runtime = struct {
             _ = try self.conn.waitDispatch(-1);
             for (self.conn.events.items) |*event| {
                 if (debug_init_events) std.debug.print("cipher: event sender={d} opcode={d} len={d}\n", .{ event.sender, event.opcode, event.payload().len });
+                if (std.c.getenv("CIPHER_TRACE_STARTUP") != null) std.debug.print("cipher[trace]: event sender={d} opcode={d} len={d} t={d}ms\n", .{ event.sender, event.opcode, event.payload().len, nowNs() });
                 if (event.sender == self.xdg_surface and event.opcode == 0) {
                     wayland.xdgSurfaceAckConfigure(self.conn, self.xdg_surface, event.read32(0));
                     configured = true;
+                    if (std.c.getenv("CIPHER_TRACE_STARTUP") != null) std.debug.print("cipher[trace]: configured t={d}ms\n", .{@divTrunc(nowNs(), 1000000)});
                 }
                 try self.dispatchInitEvent(event);
             }
@@ -394,6 +518,7 @@ pub const Runtime = struct {
         // not during the configure burst — umbriel kills the connection when
         // clients register objects during its configure sequence.
         try self.makeShmObjects();
+        if (std.c.getenv("CIPHER_TRACE_STARTUP") != null) std.debug.print("cipher[trace]: shm objects t={d}ms\n", .{@divTrunc(nowNs(), 1000000)});
 
         // GPU + font + UI (all optional; software fallback presents clear color).
         const force_sw = std.c.getenv("CIPHER_FORCE_SOFTWARE") != null;
@@ -461,7 +586,9 @@ pub const Runtime = struct {
                 }
             }
         }
-        std.debug.print("cipher: render path = {s}\n", .{if (self.swapchain != null) "vulkan-wsi" else if (self.gt != null) "vulkan-gpu-ui-shm" else "software-shm"});
+        std.debug.print("cipher: render path = {s}\n", .{if (self.swapchain != null and self.gt != null) "vulkan-wsi" else if (self.gt != null) "vulkan-gpu-ui-shm" else "software-shm"});
+        if (self.swapchain != null and self.gt == null)
+            std.debug.print("cipher: WARNING: GPU text pipeline unavailable; presenting via CPU raster (GPU path disabled)\n", .{});
 
         self.conn.setNonBlocking();
         return self;
@@ -485,6 +612,24 @@ pub const Runtime = struct {
         }
         if (self.ids.seat != null and event.sender == self.ids.seat.? and event.opcode == 0) {
             try self.onSeatCapabilities(event.read32(0));
+        }
+        if (event.sender == self.toplevel) {
+            switch (event.opcode) {
+                0 => { // configure w,h,states (logical). Steady-state dispatch does the same.
+                    const w = event.readI32(0);
+                    const h = event.readI32(1);
+                    if (w > 0 and h > 0) {
+                        const lw: u32 = @intCast(w);
+                        const lh: u32 = @intCast(h);
+                        if (lw == self.logical_w and lh == self.logical_h) return;
+                        self.resize(lw, lh) catch |e| {
+                            std.debug.print("cipher: resize failed: {s}\n", .{@errorName(e)});
+                        };
+                    }
+                },
+                else => {},
+            }
+            return;
         }
         // wl_keyboard.keymap is parsed client-side via libxkbcommon; nothing to do.
     }
@@ -908,6 +1053,43 @@ pub const Runtime = struct {
         }
     }
 
+    // ---- frame timing instrumentation (opt-in, CIPHER_FRAME_TIMING=1) ----
+    // Phases: build (begin + atlas + app.onFrame), layout (flexbox + cmd
+    // emission), encode (cmds -> quads), render (GPU / software raster).
+    // First TIMING_WARM frames count as warmup and are excluded.
+    const TIMING_WARM: u64 = 30;
+    const TIMING_EVERY: u64 = 300;
+
+    fn timingEnabled(self: *Runtime) bool {
+        if (!self.timing_init) {
+            self.timing_on = std.c.getenv("CIPHER_FRAME_TIMING") != null;
+            self.timing_init = true;
+        }
+        return self.timing_on;
+    }
+
+    fn timingDump(self: *Runtime) void {
+        const n: u64 = self.timing_count -| TIMING_WARM;
+        if (n == 0) return;
+        const build_ms = @as(f64, @floatFromInt(self.t_build_ns)) / 1e6 / @as(f64, @floatFromInt(n));
+        const layout_ms = @as(f64, @floatFromInt(self.t_layout_ns)) / 1e6 / @as(f64, @floatFromInt(n));
+        const encode_ms = @as(f64, @floatFromInt(self.t_encode_ns)) / 1e6 / @as(f64, @floatFromInt(n));
+        const render_ms = @as(f64, @floatFromInt(self.t_render_ns)) / 1e6 / @as(f64, @floatFromInt(n));
+        std.debug.print("CIPHER_BENCH frames={d} build_ms={d:.3} layout_ms={d:.3} encode_ms={d:.3} render_ms={d:.3}\n", .{ n, build_ms, layout_ms, encode_ms, render_ms });
+        // Reset the window so each TIMING_EVERY-frame block reports its own mean.
+        self.t_build_ns = 0;
+        self.t_layout_ns = 0;
+        self.t_encode_ns = 0;
+        self.t_render_ns = 0;
+        self.timing_count = TIMING_WARM;
+    }
+
+    fn fnnowNs() i64 {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        return ts.sec * 1_000_000_000 + ts.nsec;
+    }
+
     // ---- frame loop ----
 
     fn pump(self: *Runtime, app: *const App, timeout_ms: i32) !void {
@@ -922,8 +1104,16 @@ pub const Runtime = struct {
     fn present(self: *Runtime, app: *const App) !void {
         if (self.ui_state != null) {
             var u = &self.ui_state.?;
+            const timing = self.timingEnabled();
+            const m0: i64 = if (timing) fnnowNs() else 0;
+            var m1: i64 = 0;
+            var m2: i64 = 0;
+            var m3: i64 = 0;
+            _ = &m1;
+            _ = &m2;
+            _ = &m3;
             u.events = self.pending_events.items; // before begin(): begin() reads events for focus semantics
-                        u.begin(@floatFromInt(self.logical_w), @floatFromInt(self.logical_h), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed, self.scale_f) catch |e| {
+            u.begin(@floatFromInt(self.logical_w), @floatFromInt(self.logical_h), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed, self.scale_f) catch |e| {
                 if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: ui.begin error: {s}\n", .{@errorName(e)});
                 self.ui_state = null;
             };
@@ -941,11 +1131,13 @@ pub const Runtime = struct {
                     if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: onFrame error: {s}\n", .{@errorName(e)});
                     self.ui_state = null;
                 };
+                if (timing) m1 = fnnowNs();
                 if (self.ui_state != null) {
                     u.end() catch |e| {
                         if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: ui.end error: {s}\n", .{@errorName(e)});
                         self.ui_state = null;
                     };
+                    if (timing) m2 = fnnowNs();
                 }
                 if (self.ui_state != null) {
                     // background content first (terminal grid, app-drawn bg),
@@ -963,6 +1155,7 @@ pub const Runtime = struct {
                         if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: buildQuads error: {s}\n", .{@errorName(e)});
                         break :blk eq_len;
                     };
+                    if (timing) m3 = fnnowNs();
                     if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: quads n={d} extra={d} cmds={d} gt={}\n", .{ n, eq_len, u.drawCmds().len, self.gt != null });
                     if (self.gt != null and self.swapchain != null) {
                         self.gt.?.renderPresent(&self.vk, &self.dev, self.quads_buf[0..n], self.swapchain.?) catch |e| blk: {
@@ -983,6 +1176,19 @@ pub const Runtime = struct {
                         for (px[0 .. self.width * self.height]) |*p| p.* = 0xFF04060B;
                         for (self.quads_buf[0..n]) |q| rasterQuad(px, self.width, self.height, q, self.atlas.?.atlas, self.atlas.?.atlas_w, self.atlas.?.atlas_h);
                     }
+                    if (timing) {
+                        const m4 = fnnowNs();
+                        if (self.timing_count < TIMING_WARM) {
+                            self.timing_count += 1;
+                        } else {
+                            self.t_build_ns += @intCast(@max(0, m1 - m0));
+                            self.t_layout_ns += @intCast(@max(0, m2 - m1));
+                            self.t_encode_ns += @intCast(@max(0, m3 - m2));
+                            self.t_render_ns += @intCast(@max(0, m4 - m3));
+                            self.timing_count += 1;
+                        }
+                        if ((self.timing_count -| TIMING_WARM) % TIMING_EVERY == 0) self.timingDump();
+                    }
                 }
             }
             self.mouse_pressed = false;
@@ -998,8 +1204,10 @@ pub const Runtime = struct {
         self.pending_events.clearRetainingCapacity();
         _ = self.events_arena.reset(.free_all);
 
-        if (self.swapchain == null) {
+        if (self.swapchain == null or self.gt == null) {
             // attach + damage + commit
+            // (gt==null means no GPU text pipeline: present via CPU raster
+            // instead of showing a permanently stale window)
             wayland.surfaceAttach(self.conn, self.surface, self.buffer, 0, 0);
             wayland.surfaceDamage(self.conn, self.surface, 0, 0, @intCast(self.logical_w), @intCast(self.logical_h));
             wayland.surfaceCommit(self.conn, self.surface);

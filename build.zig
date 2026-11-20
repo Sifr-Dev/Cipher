@@ -66,6 +66,32 @@ pub fn build(b: *std.Build) void {
     // separate sifr-apps project, which consumes this framework by path —
     // this repo is the framework itself plus the hello example.
 
+    // cipher-bench — hillclimb-style benchmark scenes (examples/bench).
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("examples/bench/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_mod.link_libc = true;
+    bench_mod.addImport("cipher", cipher_mod);
+    const bench = b.addExecutable(.{ .name = "cipher-bench", .root_module = bench_mod });
+    b.installArtifact(bench);
+    const run_bench = b.addRunArtifact(bench);
+    run_bench.step.dependOn(b.getInstallStep());
+    b.step("run-bench", "Run the cipher benchmark (args after --)").dependOn(&run_bench.step);
+
+    // cipher — the framework's command-line tool (scaffold/build/run/doctor).
+    const cipher_cli_mod = b.createModule(.{
+        .root_source_file = b.path("tools/cipher/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cipher_cli_mod.link_libc = true;
+    const cipher_cli = b.addExecutable(.{ .name = "cipher", .root_module = cipher_cli_mod });
+    b.installArtifact(cipher_cli);
+    const run_cipher = b.addRunArtifact(cipher_cli);
+    b.step("run-cipher", "Run the cipher CLI (args after --)").dependOn(&run_cipher.step);
+
     const test_step = b.step("test", "Run all tests");
     const units = .{
         .{ "src/core/types.zig", "core_types" },

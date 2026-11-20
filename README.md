@@ -58,50 +58,23 @@ is used for text.
 
 ## Build your own app
 
-The apps in **sifr-apps** are built exactly the way an app author would.
-Copy that shape and you are done:
+Start from the full walkthrough — [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md).
+The short version:
 
-```zig
-// build.zig of YOUR app
-const fw = "../sipher/src/"; // path dependency on this checkout
-const cipher_mod = b.createModule(.{ .root_source_file = .{ .cwd_relative = fw ++ "cipher.zig" } });
-cipher_mod.link_libc = true;
-const app = b.addExecutable(.{ .name = "myapp", .root_module = app_mod });
-app_mod.addImport("cipher", cipher_mod);
+```sh
+git clone https://github.com/Sifr-Dev/Cipher.git sifr-native
+cd sifr-native && zig build && cd ..
+./sifr-native/zig-out/bin/cipher doctor           # zig + Wayland + Vulkan + fonts
+CIPHER_HOME=$PWD/sifr-native ./sifr-native/zig-out/bin/cipher new my-app
+cd my-app && zig build run                        # a window; Esc quits
 ```
 
-```zig
-const std = @import("std");
-const cipher = @import("cipher");
-
-pub const App = struct {
-    pub fn onFrame(self: *App, rt: *cipher.runtime.Runtime) !void {
-        const u = rt.ui() orelse return;
-        const title = rt.atlas != null; // text engine available
-        _ = title;
-        try u.label("my window", cipher.ui.COLOR_TEXT);
-    }
-    pub fn onEvent(self: *App, rt: *cipher.runtime.Runtime, ev: cipher.input.Event) void {
-        switch (ev) {
-            .close => rt.requestQuit(),
-            else => {},
-        }
-        _ = self;
-    }
-};
-pub fn main(init: std.process.Init.Minimal) !void {
-    _ = init;
-    var app = App{};
-    try cipher.runtime.run(App, &app); // window + frame loop + UI + text + input
-}
-```
-
-`zig build run` and your app is a window on the Wayland session — Vulkan on
-GPU, software raster with no ICD. Nothing to install: your binary dlopens
-`libwayland-client.so.0`, `libxkbcommon.so.0` and (optionally)
-`libvulkan.so.1` at runtime; everything else is statically linked in.
-`apps/hello.zig` in this repo is the canonical minimal example; the apps in
-sifr-apps are the full-scale ones (terminal + music player).
+The scaffold gives you `src/main.zig` (a panel, a label, a button), a correct
+`build.zig.zon` path dependency on this checkout, and a README. Your binary
+needs nothing at runtime but the system Wayland loader and a Vulkan ICD
+(software fallback included). `apps/hello.zig` is the richer canonical
+example (`zig build run-hello`, Esc quits); the apps in sifr-apps are the
+full-scale ones.
 
 ## verified evidence (2026-11-17, RTX 4060 Laptop + lavapipe)
 
