@@ -1,0 +1,17 @@
+.{
+    .name = .cipher,
+    .version = "0.1.0",
+    .fingerprint = 0x20fa7c9dbc90d030,
+    .minimum_zig_version = "0.17.1",
+    .paths = .{
+        "build.zig",
+        "src",
+        "examples",
+        "assets",
+        "tools",
+        "docs",
+        "protocols",
+        "README.md",
+        "LICENSE",
+    },
+}
