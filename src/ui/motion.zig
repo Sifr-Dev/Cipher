@@ -92,20 +92,23 @@ pub const Motion = struct {
         for (stale[0..n]) |k| _ = self.entries.remove(k);
     }
 
-    fn entryFor(self: *Motion, id: u64, target: f32, start: f32) *Entry {
+    fn entryFor(self: *Motion, id: u64, target: f32, start: f32) struct { entry: *Entry, is_new: bool } {
         const gop = self.entries.getOrPut(self.gpa, id) catch unreachable; // OOM in animation is not recoverable mid-frame
         if (!gop.found_existing) {
-            gop.value_ptr.* = .{ .value = start, .target = target, .used = self.frame };
+            gop.value_ptr.* = .{ .value = start, .target = target, .from = start, .used = self.frame };
         }
         gop.value_ptr.used = self.frame;
-        return gop.value_ptr;
+        return .{ .entry = gop.value_ptr, .is_new = !gop.found_existing };
     }
 
     /// Current value of spring `id` approaching `target`. First call snaps to
     /// `target`; later calls integrate the spring toward `target` over time.
     pub fn spring(self: *Motion, id: u64, target: f32, s: Spring) f32 {
-        if (self.reduce_motion) return target;
-        const e = self.entryFor(id, target, target);
+        if (self.reduce_motion) {
+            _ = self.entries.remove(id);
+            return target;
+        }
+        const e = self.entryFor(id, target, target).entry;
         if (e.target != target) {
             e.target = target; // retarget: keep current value and velocity
         }
@@ -125,23 +128,37 @@ pub const Motion = struct {
         return e.value;
     }
 
-    /// Value moving from wherever it is now to `target` over exactly
-    /// `duration` seconds, eased with a cubic Bézier curve. Retargeting
+    /// Value moving from zero to `target` over exactly `duration` seconds,
+    /// eased with a cubic Bézier curve. The first call returns zero and does
+    /// not charge dt; later calls advance. Retargeting
     /// mid-tween starts a fresh tween from the current value.
     /// Mostly useful for opacity / fades where a physical spring is wrong.
     pub fn tween(self: *Motion, id: u64, target: f32, duration: f32, curve: CubicBezier) f32 {
-        if (self.reduce_motion) return target;
+        if (self.reduce_motion) {
+            _ = self.entries.remove(id);
+            return target;
+        }
         if (duration <= 0) return target;
-        const e = self.entryFor(id, target, target);
+        const found = self.entryFor(id, target, 0);
+        const e = found.entry;
+        if (found.is_new) {
+            // A new tween begins at zero without charging dt until the next
+            // frame. This matches the previous API's fade-from-zero behavior.
+            e.from = 0;
+            e.value = 0;
+            return e.value;
+        }
         if (e.target != target) {
+            // Retargeting restarts at the last displayed value without
+            // charging the current frame's dt a second time.
             e.target = target;
             e.from = e.value;
             e.acc = 0;
-        } else {
-            e.acc += self.dt;
+        } else if (e.acc < duration) {
+            e.acc = @min(duration, e.acc + self.dt);
         }
-        const t = @min(1.0, e.acc / duration);
-        return std.math.lerp(e.from, target, curve.solve(t));
+        e.value = std.math.lerp(e.from, target, curve.solve(e.acc / duration));
+        return e.value;
     }
 };
 
@@ -154,10 +171,14 @@ pub const CubicBezier = struct {
 
     pub const ease_out = CubicBezier{ .x1 = 0.0, .y1 = 0.0, .x2 = 0.58, .y2 = 1.0 };
     pub const ease_in_out = CubicBezier{ .x1 = 0.42, .y1 = 0.0, .x2 = 0.58, .y2 = 1.0 };
-    pub const linear = CubicBezier{ .x1 = 0.0, .y1 = 0.0, .x2 = 1.0, .y2 = 1.0 };
+    // Use the conventional CSS linear control points. (0,0)-(1,1) is not
+    // exactly linear because the inner control points lie at t=1/3 and 2/3.
+    pub const linear = CubicBezier{ .x1 = 1.0 / 3.0, .y1 = 1.0 / 3.0, .x2 = 2.0 / 3.0, .y2 = 2.0 / 3.0 };
 
     pub fn solve(self: CubicBezier, x: f32) f32 {
         const x_ = std.math.clamp(x, 0.0, 1.0);
+        if (x_ == 0) return 0;
+        if (x_ == 1) return 1;
         // Bisect for the t whose bezier-x equals x_ (monotonic when x1,x2 ∈ [0,1]).
         var lo: f32 = 0;
         var hi: f32 = 1;
@@ -227,6 +248,29 @@ test "prune drops stale entries" {
     try std.testing.expect(m.entries.count() == 0);
 }
 
+test "reduce motion discards active spring and tween" {
+    var m = Motion.init(std.testing.allocator);
+    defer m.deinit();
+    _ = m.spring(901, 0, Spring.zen);
+    m.dt = 0.05;
+    _ = m.spring(901, 100, Spring.zen);
+    _ = m.tween(902, 1, 1, CubicBezier.linear);
+    m.reduce_motion = true;
+    try std.testing.expectEqual(@as(f32, 100), m.spring(901, 100, Spring.zen));
+    try std.testing.expectEqual(@as(f32, 1), m.tween(902, 1, 1, CubicBezier.linear));
+    try std.testing.expectEqual(@as(usize, 0), m.entries.count());
+    m.reduce_motion = false;
+    try std.testing.expectEqual(@as(f32, 100), m.spring(901, 100, Spring.zen));
+    try std.testing.expectEqual(@as(f32, 0), m.tween(902, 1, 1, CubicBezier.linear));
+    m.dt = 0.5;
+    _ = m.tween(902, 1, 1, CubicBezier.linear);
+    m.reduce_motion = true;
+    _ = m.tween(902, 1, 1, CubicBezier.linear);
+    try std.testing.expectEqual(@as(usize, 1), m.entries.count());
+    try std.testing.expectEqual(@as(f32, 100), m.spring(901, 100, Spring.zen));
+    try std.testing.expectEqual(@as(usize, 0), m.entries.count());
+}
+
 test "tween reaches target" {
     var m = Motion.init(std.testing.allocator);
     defer m.deinit();
@@ -238,4 +282,17 @@ test "tween reaches target" {
         v = m.tween(880, 1.0, 1.0, CubicBezier.ease_out);
     }
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), v, 0.001);
+}
+
+test "tween first call is stable and retarget resumes from current value" {
+    var m = Motion.init(std.testing.allocator);
+    defer m.deinit();
+    try std.testing.expectEqual(@as(f32, 0), m.tween(990, 1, 1, CubicBezier.linear));
+    m.dt = 0.25;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), m.tween(990, 1, 1, CubicBezier.linear), 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), m.tween(990, 2, 1, CubicBezier.linear), 0.0001);
+    m.dt = 0.5;
+    try std.testing.expectApproxEqAbs(@as(f32, 1.125), m.tween(990, 2, 1, CubicBezier.linear), 0.0001);
+    m.dt = 1;
+    try std.testing.expectEqual(@as(f32, 2), m.tween(990, 2, 1, CubicBezier.linear));
 }
