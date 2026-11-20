@@ -28,11 +28,11 @@ pub const Quad = struct {
 };
 
 const Vertex = extern struct {
-    pos: [2]f32,   // 0
-    uv: [2]f32,    // 8
+    pos: [2]f32, // 0
+    uv: [2]f32, // 8
     color: [4]f32, // 16
-    aux1: [4]f32,  // 32  SDF rect: (center.xy, half-size.xy)
-    aux2: [4]f32,  // 48  SDF rect: (radius, blur, shadow_alpha, drop_y)
+    aux1: [4]f32, // 32  SDF rect: (center.xy, half-size.xy)
+    aux2: [4]f32, // 48  SDF rect: (radius, blur, shadow_alpha, drop_y)
 };
 
 /// Must match layout(push_constant) in text.vert / text.frag.
@@ -40,11 +40,10 @@ pub const PushConstants = extern struct {
     extent: [4]f32, // xy = width/height in pixels
 };
 
-// 16384 quads covers a 200x60 terminal (12k cells) plus UI; the host-visible
-// vertex buffer stays ~6 MB. NV drivers exclude host-visible types from
-// memoryTypeBits beyond a small mappable window — larger VBs fail with
-// NoSuitableMemoryType (this was MAX_QUADS=65536 -> 25 MB and broke gt init).
-const MAX_QUADS: usize = 16384;
+// 65536 quads covers large terminal grids and UI. The ReleaseFast memory-type
+// failure was caused by const-qualified driver output pointers in device.zig,
+// not by this allocation's size; mutable pointers pass with the full buffer.
+const MAX_QUADS: usize = 65536;
 
 pub const GpuText = struct {
     width: u32,
@@ -559,7 +558,7 @@ pub const GpuText = struct {
             .blendEnable = 1,
             .srcColorBlendFactor = 1, // VK_BLEND_FACTOR_ONE (premultiplied src)
             .dstColorBlendFactor = 7, // VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
-            .colorBlendOp = 0,        // VK_BLEND_OP_ADD
+            .colorBlendOp = 0, // VK_BLEND_OP_ADD
             .srcAlphaBlendFactor = 1, // VK_BLEND_FACTOR_ONE
             .dstAlphaBlendFactor = 7, // VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
             .alphaBlendOp = 0,
@@ -627,7 +626,6 @@ pub const GpuText = struct {
 
         return self;
     }
-
 
     /// Destroy all device-child objects (safe on NVIDIA; only
     /// vkDestroyDevice/vkDestroyInstance crash there). Used on resize.

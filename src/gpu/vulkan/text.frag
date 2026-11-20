@@ -37,8 +37,8 @@ void main() {
         float s = 1.0 - smoothstep(0.0, blur, ds);
         float shadow = shadowA * s * s;
         // Premultiplied src-over of fill over shadow
-        vec3 c = color.rgb * fillA + vec3(0.0) * shadow * (1.0 - fillA);
-        float a = fillA + shadow * (1.0 - fillA);
+        vec3 c = color.rgb * color.a * fillA;
+        float a = color.a * fillA + shadow * (1.0 - color.a * fillA);
         outColor = vec4(c.b, c.g, c.r, a);
         return;
     }

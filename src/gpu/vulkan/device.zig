@@ -198,10 +198,10 @@ pub const VkExtent3D = extern struct {
     depth: u32,
 };
 
+// Exact vulkan_core.h VkQueueFamilyProperties layout; there is no index field.
 pub const VkPhysicalDeviceQueueFamilyProperties = extern struct {
-    queueFamilyIndex: u32,
-    queueCount: u32,
     queueFlags: u32,
+    queueCount: u32,
     timestampValidBits: u32,
     minImageTransferGranularity: VkExtent3D,
 };
@@ -1205,8 +1205,7 @@ pub fn createDevice(vulkan: *Vulkan, out: *Device) !void {
     }
 
     var device_count: u32 = 0;
-    if (vulkan.vkEnumeratePhysicalDevices(instance, &device_count, null) != VK_SUCCESS
-        or device_count == 0) {
+    if (vulkan.vkEnumeratePhysicalDevices(instance, &device_count, null) != VK_SUCCESS or device_count == 0) {
         vulkan.vkDestroyInstance(instance, null);
         return DeviceError.NoPhysicalDevices;
     }

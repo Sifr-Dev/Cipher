@@ -146,6 +146,29 @@ pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out
     return offset + n;
 }
 
+fn roundedBoxDistance(x: f32, y: f32, half_w: f32, half_h: f32, radius_in: f32) f32 {
+    const radius = std.math.clamp(radius_in, 0, @min(half_w, half_h));
+    const qx = @abs(x) - half_w + radius;
+    const qy = @abs(y) - half_h + radius;
+    return @sqrt(@max(qx, 0) * @max(qx, 0) + @max(qy, 0) * @max(qy, 0)) + @min(@max(qx, qy), 0) - radius;
+}
+
+fn smoothStep(edge0: f32, edge1: f32, x: f32) f32 {
+    const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0, 1);
+    return t * t * (3 - 2 * t);
+}
+
+fn roundedBoxCoverage(x: f32, y: f32, half_w: f32, half_h: f32, radius: f32) f32 {
+    const d = roundedBoxDistance(x, y, half_w, half_h, radius);
+    return 1 - smoothStep(-1.5, 1.5, d);
+}
+
+fn shadowCoverage(x: f32, y: f32, half_w: f32, half_h: f32, radius: f32, blur: f32) f32 {
+    const d = roundedBoxDistance(x, y, half_w, half_h, radius);
+    const s = 1 - smoothStep(0, @max(blur, 1), d);
+    return s * s;
+}
+
 /// CPU rasterizer for one GPU-shaped quad (solid rect when the UVs are the
 /// reserved (0,0)-(0,0) white texel, else an atlas-sampled glyph quad).
 /// Blends source-over into the ARGB8888 (0xAARRGGBB) shm framebuffer.
@@ -153,19 +176,15 @@ pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out
 /// or headless/driverless sessions).
 fn rasterQuad(px: []u32, fb_w: u32, fb_h: u32, q: text_gpu.Quad, atlas: []const u8, atlas_w: u32, atlas_h: u32) void {
     const solid = q.u0 == 0 and q.v0 == 0 and q.u1 == 0 and q.v1 == 0;
-    // Hardware path has real SDF rounded+shadow; the CPU path fills the inner
-    // box only (shadow is dropped, corners square) — compat-only, not shipped.
-    const sdf = q.u0 == 2 and q.v0 == 2;
-    const qx = if (sdf) q.aux1[0] - q.aux1[2] else q.x;
-    const qy = if (sdf) q.aux1[1] - q.aux1[3] else q.y;
-    const qw = if (sdf) q.aux1[2] * 2 else q.w;
-    const qh = if (sdf) q.aux1[3] * 2 else q.h;
+    // Rounded rectangles use signed-distance coverage. Sampling the atlas
+    // with sentinel UVs would instead create an opaque square.
+    const sdf = q.u0 == 2 and q.v0 == 2 and q.u1 == 2 and q.v1 == 2;
     const fw = @as(f32, @floatFromInt(fb_w));
     const fh = @as(f32, @floatFromInt(fb_h));
-    const fx0 = @max(0.0, qx);
-    const fy0 = @max(0.0, qy);
-    const fx1 = @min(fw, qx + qw);
-    const fy1 = @min(fh, qy + qh);
+    const fx0 = @max(0.0, q.x);
+    const fy0 = @max(0.0, q.y);
+    const fx1 = @min(fw, q.x + q.w);
+    const fy1 = @min(fh, q.y + q.h);
     if (fx1 <= fx0 or fy1 <= fy0) return;
     const ix0: i32 = @intFromFloat(@floor(fx0));
     const iy0: i32 = @intFromFloat(@floor(fy0));
@@ -181,35 +200,94 @@ fn rasterQuad(px: []u32, fb_w: u32, fb_h: u32, q: text_gpu.Quad, atlas: []const 
     while (py < iy1) : (py += 1) {
         var pxi = ix0;
         while (pxi < ix1) : (pxi += 1) {
-            var cov: u32 = 255;
-            if (!solid) {
-                const u = (@as(f32, @floatFromInt(pxi)) + 0.5 - q.x) / q.w * (q.u1 - q.u0) + q.u0;
-                const v = (@as(f32, @floatFromInt(py)) + 0.5 - q.y) / q.h * (q.v1 - q.v0) + q.v0;
-                const tu: f32 = std.math.clamp(u, 0.0, @as(f32, @floatFromInt(atlas_w - 1)) / afw);
-                const tv: f32 = std.math.clamp(v, 0.0, @as(f32, @floatFromInt(atlas_h - 1)) / afh);
-                const tx: u32 = @intFromFloat(@floor(tu * afw));
-                const ty: u32 = @intFromFloat(@floor(tv * afh));
-                cov = atlas[@as(usize, ty) * @as(usize, atlas_w) + tx];
-                if (cov == 0) continue;
-            }
-            const sa = @as(f32, @floatFromInt(cov)) / 255.0 * ca;
-            if (sa <= 0) continue;
             const idx: usize = @as(usize, @intCast(py)) * @as(usize, fb_w) + @as(usize, @intCast(pxi));
             const dst = px[idx];
             const da = @as(f32, @floatFromInt((dst >> 24) & 0xFF)) / 255.0;
             const dr = @as(f32, @floatFromInt((dst >> 16) & 0xFF)) / 255.0;
             const dg = @as(f32, @floatFromInt((dst >> 8) & 0xFF)) / 255.0;
             const db = @as(f32, @floatFromInt(dst & 0xFF)) / 255.0;
+            var sr = cr;
+            var sg = cg;
+            var sb = cb;
+            var sa = ca;
+            if (sdf) {
+                const x = @as(f32, @floatFromInt(pxi)) + 0.5;
+                const y = @as(f32, @floatFromInt(py)) + 0.5;
+                const fill_a = roundedBoxCoverage(x - q.aux1[0], y - q.aux1[1], q.aux1[2], q.aux1[3], q.aux2[0]);
+                const shadow_a = shadowCoverage(x - q.aux1[0], y - q.aux1[1] - q.aux2[3], q.aux1[2], q.aux1[3], q.aux2[0], q.aux2[1]) * q.aux2[2];
+                // Coverage is outside the fill/shadow alpha product, just
+                // as in the fragment shader's premultiplied composition.
+                sa = fill_a * ca + shadow_a * (1 - fill_a * ca);
+                const color_weight = if (sa > 0) fill_a * ca / sa else 0;
+                sr *= color_weight;
+                sg *= color_weight;
+                sb *= color_weight;
+            } else {
+                var cov: u32 = 255;
+                if (!solid) {
+                    const u = (@as(f32, @floatFromInt(pxi)) + 0.5 - q.x) / q.w * (q.u1 - q.u0) + q.u0;
+                    const v = (@as(f32, @floatFromInt(py)) + 0.5 - q.y) / q.h * (q.v1 - q.v0) + q.v0;
+                    const tu: f32 = std.math.clamp(u, 0.0, @as(f32, @floatFromInt(atlas_w - 1)) / afw);
+                    const tv: f32 = std.math.clamp(v, 0.0, @as(f32, @floatFromInt(atlas_h - 1)) / afh);
+                    const tx: u32 = @intFromFloat(@floor(tu * afw));
+                    const ty: u32 = @intFromFloat(@floor(tv * afh));
+                    cov = atlas[@as(usize, ty) * @as(usize, atlas_w) + tx];
+                }
+                sa *= @as(f32, @floatFromInt(cov)) / 255.0;
+            }
+            if (sa <= 0) continue;
             const oa = sa + da * (1 - sa);
-            const orr = if (oa > 0) (cr * sa + dr * da * (1 - sa)) / oa else 0;
-            const ogr = if (oa > 0) (cg * sa + dg * da * (1 - sa)) / oa else 0;
-            const obl = if (oa > 0) (cb * sa + db * da * (1 - sa)) / oa else 0;
+            const orr = if (oa > 0) (sr * sa + dr * da * (1 - sa)) / oa else 0;
+            const ogr = if (oa > 0) (sg * sa + dg * da * (1 - sa)) / oa else 0;
+            const obl = if (oa > 0) (sb * sa + db * da * (1 - sa)) / oa else 0;
             px[idx] = (@as(u32, @intFromFloat(@round(oa * 255))) << 24) |
                 (@as(u32, @intFromFloat(@round(orr * 255))) << 16) |
                 (@as(u32, @intFromFloat(@round(ogr * 255))) << 8) |
                 @as(u32, @intFromFloat(@round(obl * 255)));
         }
     }
+}
+
+test "software rounded rectangle renders corners, shadow, and fill alpha" {
+    var px: [100 * 100]u32 = @splat(0xFF04060B);
+    const q = text_gpu.Quad{
+        .x = 10,
+        .y = 10,
+        .w = 80,
+        .h = 80,
+        .u0 = 2,
+        .v0 = 2,
+        .u1 = 2,
+        .v1 = 2,
+        .color = .{ 1, 0.5, 0, 0.5 },
+        .aux1 = .{ 50, 50, 20, 20 },
+        .aux2 = .{ 8, 10, 0.5, 4 },
+    };
+    rasterQuad(&px, 100, 100, q, &.{0}, 1, 1);
+    const bg = 0xFF04060B;
+    // Outside the rounded corner and its feather stays clear; the center
+    // has the 50% fill.
+    try std.testing.expectEqual(bg, px[25 * 100 + 25]);
+    const center = px[50 * 100 + 50];
+    // The integer-pixel edge sits within the shader's bounded AA feather.
+    try std.testing.expectEqual(@as(u32, 0xFF814103), px[49 * 100 + 49]);
+    // At the center of the integer-pixel rounded rectangle, shader and CPU
+    // antialias coverage is 0.5. Preserve the exact CPU reference value.
+    try std.testing.expectEqual(@as(u32, 0xFF814103), center);
+    // A feathered shadow remains beyond the fill's lower edge.
+    try std.testing.expect(px[77 * 100 + 50] != bg);
+    try std.testing.expect(px[77 * 100 + 50] != center);
+    // Transparent fill does not suppress its requested shadow. Test on a
+    // clean buffer, not on the previous fill (frames are cleared each time).
+    var clean: [100 * 100]u32 = @splat(0xFF04060B);
+    var transparent = q;
+    transparent.color[3] = 0;
+    rasterQuad(&clean, 100, 100, transparent, &.{0}, 1, 1);
+    try std.testing.expect(clean[77 * 100 + 50] != bg);
+    // Only the black shadow remains; it darkens but cannot erase the opaque
+    // background's alpha.
+    try std.testing.expectEqual(@as(u32, 0xFF000000), clean[50 * 100 + 50] & 0xFF000000);
+    try std.testing.expect((clean[50 * 100 + 50] & 0x00FFFFFF) < (bg & 0x00FFFFFF));
 }
 
 /// Decode a text/uri-list payload into newline-separated local paths
@@ -365,7 +443,9 @@ pub const Runtime = struct {
         self.pending_events = .empty;
         self.events_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         self.quads_buf = try std.heap.page_allocator.alloc(text_gpu.Quad, 65536);
-        self.extra_quads = null; const compositor_g = self.conn.findGlobal("wl_compositor") orelse return error.NoCompositor;
+        self.extra_quads = null;
+
+        const compositor_g = self.conn.findGlobal("wl_compositor") orelse return error.NoCompositor;
         const shm_g = self.conn.findGlobal("wl_shm") orelse return error.NoShm;
         const wm_base_g = self.conn.findGlobal("xdg_wm_base") orelse return error.NoWmBase;
         const seat_g = self.conn.findGlobal("wl_seat") orelse return error.NoSeat;
@@ -1033,7 +1113,7 @@ pub const Runtime = struct {
             _ = &m2;
             _ = &m3;
             u.events = self.pending_events.items; // before begin(): begin() reads events for focus semantics
-                        u.begin(@floatFromInt(self.logical_w), @floatFromInt(self.logical_h), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed, self.scale_f) catch |e| {
+            u.begin(@floatFromInt(self.logical_w), @floatFromInt(self.logical_h), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed, self.scale_f) catch |e| {
                 if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: ui.begin error: {s}\n", .{@errorName(e)});
                 self.ui_state = null;
             };
