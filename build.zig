@@ -66,6 +66,18 @@ pub fn build(b: *std.Build) void {
     // separate sifr-apps project, which consumes this framework by path —
     // this repo is the framework itself plus the hello example.
 
+    // cipher — the framework's command-line tool (scaffold/build/run/doctor).
+    const cipher_cli_mod = b.createModule(.{
+        .root_source_file = b.path("tools/cipher/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cipher_cli_mod.link_libc = true;
+    const cipher_cli = b.addExecutable(.{ .name = "cipher", .root_module = cipher_cli_mod });
+    b.installArtifact(cipher_cli);
+    const run_cipher = b.addRunArtifact(cipher_cli);
+    b.step("run-cipher", "Run the cipher CLI (args after --)").dependOn(&run_cipher.step);
+
     const test_step = b.step("test", "Run all tests");
     const units = .{
         .{ "src/core/types.zig", "core_types" },
