@@ -46,19 +46,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 }
 
-fn findZigChecked() ![]const u8 {
-    var buf: [512]u8 = undefined;
-    return util.findZig(&buf) orelse {
-        std.debug.print("cipher: zig not found on PATH (set $ZIG to the zig binary)\n", .{});
-        return error.ZigNotFound;
-    };
-}
-
 fn runZig(extra: []const []const u8, base: []const []const u8) !u8 {
-    const zig = findZigChecked() catch return 127;
+    // findZig writes into storage that must remain alive through exec.
+    var zig_buf: [512]u8 = undefined;
+    const zig = util.findZig(&zig_buf) orelse {
+        std.debug.print("cipher: zig not found on PATH (set $ZIG to the zig binary)\n", .{});
+        return 127;
+    };
     var argv = std.ArrayList([]const u8).empty;
     defer argv.deinit(std.heap.page_allocator);
     const alloc = std.heap.page_allocator;
+    // runInherit supplies argv[0]; base contains only zig's subcommand.
     try argv.appendSlice(alloc, base);
     try argv.appendSlice(alloc, extra);
     return util.runInherit(zig, argv.items);

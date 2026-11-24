@@ -55,9 +55,14 @@ test "GPU compute renders exact pixels into host buffer" {
     }
     var header_buf: [64]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buf, "P6\n{d} {d}\n255\n", .{ w, h });
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, "/tmp/sifr_frame.ppm", .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
-    defer _ = std.c.close(fd);
-    try std.testing.expectEqual(@as(isize, @intCast(header.len)), std.c.write(fd, header.ptr, header.len));
-    try std.testing.expectEqual(@as(isize, @intCast(ppm.len)), std.c.write(fd, &ppm, ppm.len));
-    std.debug.print("GPU_FRAME_PPM /tmp/sifr_frame.ppm {d}x{d}\n", .{ w, h });
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "frame.ppm", .{});
+    var writer_buf: [4096]u8 = undefined;
+    var writer = file.writer(std.testing.io, &writer_buf);
+    try writer.interface.writeAll(header);
+    try writer.interface.writeAll(&ppm);
+    try writer.interface.flush();
+    file.close(std.testing.io);
+    std.debug.print("GPU_FRAME_PPM .zig-cache/tmp/{s}/frame.ppm {d}x{d}\n", .{ tmp.sub_path, w, h });
 }

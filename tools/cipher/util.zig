@@ -137,7 +137,14 @@ pub fn runCapture(alloc: std.mem.Allocator, program: []const u8, args: []const [
 }
 
 fn allocSentinelZ(alloc: std.mem.Allocator, s: []const u8) ![*c]const u8 {
-    const b = try alloc.allocSentinel(u8, s.len, 0);
-    @memcpy(b, s);
-    return @ptrCast(b.ptr);
+    const b = try alloc.dupeSentinel(u8, s, 0);
+    return b.ptr;
+}
+
+test "process helpers preserve argv and capture output" {
+    const rc = try runInherit("/bin/sh", &.{ "-c", "exit 23" });
+    try std.testing.expectEqual(@as(u8, 23), rc);
+    const out = try runCapture(std.testing.allocator, "/bin/sh", &.{ "-c", "printf process-ok" }, 64);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("process-ok", out);
 }
