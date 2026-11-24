@@ -163,14 +163,14 @@ test "GPU text: atlas upload + glyph quad renders exact pixels" {
     }
     var header_buf: [64]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buf, "P6\n{d} {d}\n255\n", .{ W, H });
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, "/tmp/sifr_gpu_text.ppm", .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
-    defer _ = std.c.close(fd);
-    _ = std.c.write(fd, header.ptr, header.len);
-    var off: usize = 0;
-    while (off < ppm.len) {
-        const n = std.c.write(fd, ppm[off..].ptr, ppm.len - off);
-        if (n <= 0) break;
-        off += @as(usize, @intCast(n));
-    }
-    std.debug.print("GPU_TEXT_PPM /tmp/sifr_gpu_text.ppm {d}x{d}\n", .{ W, H });
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "gpu-text.ppm", .{});
+    var writer_buf: [4096]u8 = undefined;
+    var writer = file.writer(std.testing.io, &writer_buf);
+    try writer.interface.writeAll(header);
+    try writer.interface.writeAll(&ppm);
+    try writer.interface.flush();
+    file.close(std.testing.io);
+    std.debug.print("GPU_TEXT_PPM .zig-cache/tmp/{s}/gpu-text.ppm {d}x{d}\n", .{ tmp.sub_path, W, H });
 }

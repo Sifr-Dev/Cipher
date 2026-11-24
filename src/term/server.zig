@@ -42,6 +42,30 @@ pub const Client = struct {
     closed: bool = false,
 };
 
+const TestServer = struct {
+    allocator: std.mem.Allocator,
+    directory: []u8,
+    server: Server,
+
+    fn init(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) !TestServer {
+        // Unix socket paths are limited to 107 bytes, much shorter than a
+        // test-cache path. The random test id and pid isolate every test.
+        const directory = try std.fmt.allocPrint(allocator, "/tmp/cipher-term-{d}-{s}", .{ std.os.linux.getpid(), tmp.sub_path });
+        errdefer allocator.free(directory);
+        try std.Io.Dir.createDirAbsolute(std.testing.io, directory, .default_dir);
+        errdefer std.Io.Dir.deleteDirAbsolute(std.testing.io, directory) catch {};
+        const socket_path = try std.fmt.allocPrint(allocator, "{s}/socket", .{directory});
+        defer allocator.free(socket_path);
+        return .{ .allocator = allocator, .directory = directory, .server = try Server.init(allocator, socket_path) };
+    }
+
+    fn deinit(self: *TestServer) void {
+        self.server.deinit();
+        std.Io.Dir.deleteDirAbsolute(std.testing.io, self.directory) catch {};
+        self.allocator.free(self.directory);
+    }
+};
+
 pub const Server = struct {
     allocator: std.mem.Allocator,
     listen_fd: i32,
@@ -230,7 +254,7 @@ pub const Server = struct {
             try self.opAttach(c, v);
         } else if (std.mem.eql(u8, op, "detach")) {
             c.attach_pane = null;
-            const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } } });
+            const e = try self.makeObj(&[_]json.Value.Entry{.{ .key = "ok", .value = .{ .bool = true } }});
             try self.reply(c, .{ .obj = e });
         } else {
             try self.replyErr(c, "unknown op");
@@ -327,7 +351,7 @@ pub const Server = struct {
         const s = data.strOf() orelse return self.replyErr(c, "data must be a string");
         if (!p.alive) return self.replyErr(c, "pane dead");
         p.pty.write(s) catch return self.replyErr(c, "write failed (pane dead?)");
-        const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } } });
+        const e = try self.makeObj(&[_]json.Value.Entry{.{ .key = "ok", .value = .{ .bool = true } }});
         try self.reply(c, .{ .obj = e });
     }
 
@@ -415,7 +439,7 @@ pub const Server = struct {
         // self.panes for this iteration, so removing here would corrupt them.
         p.zombie = true;
         p.alive = false;
-        const e = try self.makeObj(&[_]json.Value.Entry{ .{ .key = "ok", .value = .{ .bool = true } } });
+        const e = try self.makeObj(&[_]json.Value.Entry{.{ .key = "ok", .value = .{ .bool = true } }});
         try self.reply(c, .{ .obj = e });
     }
 
@@ -610,10 +634,13 @@ fn drainReplies(srv: *Server, c: *Client) ![]u8 {
 
 test "server: spawn sh, run --wait captures output, ls/capture/close work" {
     const alloc = std.testing.allocator;
-    var srv = try Server.init(alloc, "/tmp/cipher-rex-test.sock");
-    defer srv.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try TestServer.init(alloc, &tmp);
+    defer fixture.deinit();
+    var srv = &fixture.server;
 
-    const c = try testClient(&srv);
+    const c = try testClient(srv);
     defer {
         c.in_buf.deinit(alloc);
         c.out_buf.deinit(alloc);
@@ -622,7 +649,7 @@ test "server: spawn sh, run --wait captures output, ls/capture/close work" {
 
     // spawn
     try srv.handleLine(c, "{\"op\":\"spawn\",\"cmd\":[\"/bin/sh\"],\"cols\":80,\"rows\":24}");
-    var rep = try drainReplies(&srv, c);
+    var rep = try drainReplies(srv, c);
     try std.testing.expect(std.mem.indexOf(u8, rep, "\"ok\":true") != null);
     const v = try json.Parser.parse(alloc, std.mem.trim(u8, rep, " \n"));
     defer json.freeValue(alloc, v);
@@ -641,10 +668,13 @@ test "server: spawn sh, run --wait captures output, ls/capture/close work" {
         for (srv.panes.items) |p| try srv.pumpPane(p);
         try srv.checkWaits();
         if (c.out_buf.items.len > 0) break;
-        { var ts = std.os.linux.timespec{ .sec = 0, .nsec = 10 * 1_000_000 }; _ = std.os.linux.nanosleep(&ts, null); }
+        {
+            var ts = std.os.linux.timespec{ .sec = 0, .nsec = 10 * 1_000_000 };
+            _ = std.os.linux.nanosleep(&ts, null);
+        }
     }
     alloc.free(rep);
-    rep = try drainReplies(&srv, c);
+    rep = try drainReplies(srv, c);
     try std.testing.expect(std.mem.indexOf(u8, rep, "MARKER_") != null);
     try std.testing.expect(std.mem.indexOf(u8, rep, "DONE") != null);
     std.debug.print("SERVER_RUN_WAIT_OK output has marker\n", .{});
@@ -653,35 +683,34 @@ test "server: spawn sh, run --wait captures output, ls/capture/close work" {
     try srv.handleLine(c, "{\"op\":\"capture\",\"pane\":1}");
     for (srv.panes.items) |p| try srv.pumpPane(p);
     alloc.free(rep);
-    rep = try drainReplies(&srv, c);
+    rep = try drainReplies(srv, c);
     try std.testing.expect(std.mem.indexOf(u8, rep, "MARKER_") != null);
     std.debug.print("SERVER_CAPTURE_OK\n", .{});
 
     // ls
     try srv.handleLine(c, "{\"op\":\"ls\"}");
     alloc.free(rep);
-    rep = try drainReplies(&srv, c);
+    rep = try drainReplies(srv, c);
     try std.testing.expect(std.mem.indexOf(u8, rep, "\"panes\"") != null);
     std.debug.print("SERVER_LS_OK\n", .{});
 
     // send raw input: run 'exit' then close
     try srv.handleLine(c, "{\"op\":\"send\",\"pane\":1,\"data\":\"exit\\n\"}");
     alloc.free(rep);
-    rep = try drainReplies(&srv, c);
+    rep = try drainReplies(srv, c);
     try std.testing.expect(std.mem.indexOf(u8, rep, "\"ok\":true") != null);
     std.debug.print("SERVER_SEND_OK\n", .{});
 
     // close
     try srv.handleLine(c, "{\"op\":\"close\",\"pane\":1}");
     alloc.free(rep);
-    rep = try drainReplies(&srv, c);
+    rep = try drainReplies(srv, c);
     try std.testing.expect(std.mem.indexOf(u8, rep, "\"ok\":true") != null);
     srv.sweepZombies(); // the poll loop normally does this after the iteration
     try std.testing.expectEqual(@as(usize, 0), srv.panes.items.len);
     std.debug.print("SERVER_CLOSE_OK\n", .{});
     alloc.free(rep);
 }
-
 
 // ---- real-socket end-to-end regression test ----
 
@@ -746,23 +775,25 @@ fn sockReadLine(fd: i32, allocator: std.mem.Allocator, timeout_ms: i32) !?[]u8 {
 
 test "server e2e over real socket: spawn, run --wait, capture, close, ls — server survives close" {
     const alloc = std.testing.allocator;
-    const path = "/tmp/cipher-rex-e2e.sock";
-    var srv = try Server.init(alloc, path);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try TestServer.init(alloc, &tmp);
+    defer fixture.deinit();
+    var srv = &fixture.server;
     const t = try std.Thread.spawn(.{}, struct {
         fn runit(s: *Server) void {
             s.run() catch {};
         }
-    }.runit, .{&srv});
+    }.runit, .{srv});
     defer {
         srv.running = false;
         t.join();
-        srv.deinit();
     }
 
     var fd: i32 = -1;
     const deadline = pty_mod.nowNs() + 3 * 1_000_000_000;
     while (pty_mod.nowNs() < deadline) {
-        if (sockConnect(path)) |f| {
+        if (sockConnect(srv.socket_path)) |f| {
             fd = f;
             break;
         } else |_| {
@@ -865,22 +896,24 @@ test "server e2e over real socket: spawn, run --wait, capture, close, ls — ser
 
 test "server e2e attach: replay ring + streamed output events, server survives" {
     const alloc = std.testing.allocator;
-    const path = "/tmp/cipher-rex-attach-e2e.sock";
-    var srv = try Server.init(alloc, path);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try TestServer.init(alloc, &tmp);
+    defer fixture.deinit();
+    var srv = &fixture.server;
     const t = try std.Thread.spawn(.{}, struct {
         fn runit(s: *Server) void {
             s.run() catch {};
         }
-    }.runit, .{&srv});
+    }.runit, .{srv});
     defer {
         srv.running = false;
         t.join();
-        srv.deinit();
     }
     var fd: i32 = -1;
     const deadline = pty_mod.nowNs() + 3 * 1_000_000_000;
     while (pty_mod.nowNs() < deadline) {
-        if (sockConnect(path)) |f| {
+        if (sockConnect(srv.socket_path)) |f| {
             fd = f;
             break;
         } else |_| {
