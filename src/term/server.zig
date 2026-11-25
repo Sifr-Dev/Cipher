@@ -782,7 +782,7 @@ test "server e2e over real socket: spawn, run --wait, capture, close, ls — ser
     var srv = &fixture.server;
     const t = try std.Thread.spawn(.{}, struct {
         fn runit(s: *Server) void {
-            s.run() catch {};
+            s.run() catch |e| std.debug.print("server test run error: {s}\n", .{@errorName(e)});
         }
     }.runit, .{srv});
     defer {
@@ -903,7 +903,7 @@ test "server e2e attach: replay ring + streamed output events, server survives" 
     var srv = &fixture.server;
     const t = try std.Thread.spawn(.{}, struct {
         fn runit(s: *Server) void {
-            s.run() catch {};
+            s.run() catch |e| std.debug.print("server test run error: {s}\n", .{@errorName(e)});
         }
     }.runit, .{srv});
     defer {

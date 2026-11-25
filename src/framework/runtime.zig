@@ -15,7 +15,10 @@ const ui_mod = @import("../ui/ui.zig");
 const layout_mod = @import("../ui/layout.zig");
 const input = @import("input.zig");
 
-pub const DEFAULT_FONT = "/usr/share/fonts/liberation/LiberationSans-Regular.ttf";
+/// Instrument Sans, distributed with its OFL license in `assets/`.
+/// Compiled into each app so a default UI never depends on installed fonts.
+pub const default_font_data = @import("resources").default_font;
+pub const default_font_license = @import("resources").default_font_license;
 pub const DEFAULT_UI_PX: f32 = 20;
 pub const DEFAULT_W: u32 = 960;
 pub const DEFAULT_H: u32 = 600;
@@ -23,7 +26,12 @@ pub const DEFAULT_H: u32 = 600;
 pub const Options = struct {
     title: []const u8 = "cipher",
     app_id: []const u8 = "cipher",
-    font_path: []const u8 = DEFAULT_FONT,
+    /// Optional SFNT data, which must outlive the runtime. The built-in OFL
+    /// font is used when this is null; no filesystem font is required.
+    font_data: ?[]const u8 = null,
+    /// Optional external primary font. Set this explicitly to replace the
+    /// built-in font. Its data is owned and released by the runtime.
+    font_path: ?[]const u8 = null,
     /// Extra fonts tried (in order) when the primary misses a glyph.
     /// Their SFNT data must stay alive for the process lifetime; apps
     /// typically pass paths (the runtime reads them) rather than buffers.
@@ -368,6 +376,7 @@ pub const Runtime = struct {
     atlas: ?*atlas_mod.TextAtlas = null, // heap-boxed: Ui holds a pointer; Runtime is moved by value
     ui_state: ?ui_mod.Ui = null,
     font_data: ?[]u8 = null,
+    fallback_font_data: std.ArrayList([]u8),
     quads_buf: []text_gpu.Quad,
     /// App-provided extra quads appended after the UI quads each frame
     /// (used by terminal renderers). present() consumes and clears it.
@@ -440,6 +449,7 @@ pub const Runtime = struct {
         self.height = dev_h;
         self.shm_buf = try wayland.ShmBuffer.allocate(self.width, self.height);
         self.offer_mimes = .empty;
+        self.fallback_font_data = .empty;
         self.pending_events = .empty;
         self.events_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         self.quads_buf = try std.heap.page_allocator.alloc(text_gpu.Quad, 65536);
@@ -523,55 +533,69 @@ pub const Runtime = struct {
         // GPU + font + UI (all optional; software fallback presents clear color).
         const force_sw = std.c.getenv("CIPHER_FORCE_SOFTWARE") != null;
         // Load font + atlas unconditionally; software rendering works without Vulkan.
-        if (readFileAlloc(opts.font_path, std.heap.page_allocator)) |font_data| {
-            self.font_data = font_data;
-            if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, opts.ui_px * self.scale_f)) |a| {
-                const boxed = try std.heap.page_allocator.create(atlas_mod.TextAtlas);
-                boxed.* = a;
-                self.atlas = boxed;
-                for (opts.fallback_font_paths) |fb_path| {
-                    const fb_data = readFileAlloc(fb_path, std.heap.page_allocator) catch continue;
-                    self.atlas.?.addFallback(fb_data) catch continue;
-                }
-                self.atlas.?.bake(32, 126) catch {};
-                self.atlas.?.bake(160, 255) catch {};
-                // UI state is created now regardless of GPU path so the
-                // software-shm fallback can render the UI on CPU.
-                self.ui_state = ui_mod.Ui.init(std.heap.page_allocator, self.atlas.?);
-                // Optional GPU path
-                if (!force_sw) if (device.load()) |v| {
-                    self.vk = v;
-                    if (device.createDevice(&self.vk, &self.dev)) {
-                        self.vk_loaded = true;
-                        if (text_gpu.GpuText.init(&self.vk, &self.dev, self.width, self.height, self.atlas.?.atlas_w, self.atlas.?.atlas_h)) |g| {
-                            self.gt = g;
-                            self.gt.?.uploadAtlas(&self.vk, &self.dev, self.atlas.?.atlas) catch {
-                                std.debug.print("cipher: gpu block failed at uploadAtlas\n", .{});
-                                self.gt = null;
-                            };
-                        } else |e| std.debug.print("cipher: gpu block failed at GpuText.init: {s}\n", .{@errorName(e)});
-                    } else |e| std.debug.print("cipher: gpu block failed at createDevice: {s}\n", .{@errorName(e)});
-                } else |e| std.debug.print("cipher: gpu block failed at load: {s}\n", .{@errorName(e)});
-                // CIPHER_DUMP_ATLAS debug output
-                if (std.c.getenv("CIPHER_DUMP_ATLAS")) |p| {
-                    const fd = std.posix.openat(std.posix.AT.FDCWD, std.mem.span(p), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch null;
-                    if (fd) |f| {
-                        defer _ = std.c.close(f);
-                        var hdr_buf: [64]u8 = undefined;
-                        const hdr = std.fmt.bufPrint(&hdr_buf, "P6\n{d} {d}\n255\n", .{ self.atlas.?.atlas_w, self.atlas.?.atlas_h }) catch unreachable;
-                        _ = std.os.linux.write(f, hdr.ptr, hdr.len);
-                        var buf3 = try std.heap.page_allocator.alloc(u8, self.atlas.?.atlas.len * 3);
-                        defer std.heap.page_allocator.free(buf3);
-                        for (self.atlas.?.atlas, 0..) |px, i| {
-                            buf3[i * 3] = px;
-                            buf3[i * 3 + 1] = px;
-                            buf3[i * 3 + 2] = px;
-                        }
-                        _ = std.os.linux.write(f, buf3.ptr, buf3.len);
+        // The default is embedded and independent of the host font setup.
+        // An app can explicitly supply bytes or an external path instead.
+        const font_data = if (opts.font_path) |path|
+            readFileAlloc(path, std.heap.page_allocator) catch |e| {
+                std.debug.print("cipher: cannot load font {s}: {s}\n", .{ path, @errorName(e) });
+                return error.FontLoadFailed;
+            }
+        else
+            opts.font_data orelse default_font_data;
+        if (opts.font_path != null) self.font_data = @constCast(font_data);
+        if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, opts.ui_px * self.scale_f)) |a| {
+            const boxed = try std.heap.page_allocator.create(atlas_mod.TextAtlas);
+            boxed.* = a;
+            self.atlas = boxed;
+            for (opts.fallback_font_paths) |fb_path| {
+                const fb_data = readFileAlloc(fb_path, std.heap.page_allocator) catch continue;
+                self.atlas.?.addFallback(fb_data) catch {
+                    std.heap.page_allocator.free(fb_data);
+                    continue;
+                };
+                try self.fallback_font_data.append(std.heap.page_allocator, fb_data);
+            }
+            self.atlas.?.bake(32, 126) catch {};
+            self.atlas.?.bake(160, 255) catch {};
+            // UI state is created now regardless of GPU path so the
+            // software-shm fallback can render the UI on CPU.
+            self.ui_state = ui_mod.Ui.init(std.heap.page_allocator, self.atlas.?);
+            // Optional GPU path
+            if (!force_sw) if (device.load()) |v| {
+                self.vk = v;
+                if (device.createDevice(&self.vk, &self.dev)) {
+                    self.vk_loaded = true;
+                    if (text_gpu.GpuText.init(&self.vk, &self.dev, self.width, self.height, self.atlas.?.atlas_w, self.atlas.?.atlas_h)) |g| {
+                        self.gt = g;
+                        self.gt.?.uploadAtlas(&self.vk, &self.dev, self.atlas.?.atlas) catch {
+                            std.debug.print("cipher: gpu block failed at uploadAtlas\n", .{});
+                            self.gt = null;
+                        };
+                    } else |e| std.debug.print("cipher: gpu block failed at GpuText.init: {s}\n", .{@errorName(e)});
+                } else |e| std.debug.print("cipher: gpu block failed at createDevice: {s}\n", .{@errorName(e)});
+            } else |e| std.debug.print("cipher: gpu block failed at load: {s}\n", .{@errorName(e)});
+            // CIPHER_DUMP_ATLAS debug output
+            if (std.c.getenv("CIPHER_DUMP_ATLAS")) |p| {
+                const fd = std.posix.openat(std.posix.AT.FDCWD, std.mem.span(p), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch null;
+                if (fd) |f| {
+                    defer _ = std.c.close(f);
+                    var hdr_buf: [64]u8 = undefined;
+                    const hdr = std.fmt.bufPrint(&hdr_buf, "P6\n{d} {d}\n255\n", .{ self.atlas.?.atlas_w, self.atlas.?.atlas_h }) catch unreachable;
+                    _ = std.os.linux.write(f, hdr.ptr, hdr.len);
+                    var buf3 = try std.heap.page_allocator.alloc(u8, self.atlas.?.atlas.len * 3);
+                    defer std.heap.page_allocator.free(buf3);
+                    for (self.atlas.?.atlas, 0..) |px, i| {
+                        buf3[i * 3] = px;
+                        buf3[i * 3 + 1] = px;
+                        buf3[i * 3 + 2] = px;
                     }
+                    _ = std.os.linux.write(f, buf3.ptr, buf3.len);
                 }
-            } else |_| {}
-        } else |_| {}
+            }
+        } else |e| {
+            std.debug.print("cipher: invalid font data: {s}\n", .{@errorName(e)});
+            return error.FontLoadFailed;
+        }
         // WSI: direct Vulkan presentation (no readback/wl_shm on this path)
         if (self.vk_loaded and std.c.getenv("CIPHER_FORCE_SOFTWARE") == null and std.c.getenv("CIPHER_DISABLE_WSI") == null) {
             const surf_proxy = self.conn.proxyFromToken(self.surface);
@@ -696,6 +720,9 @@ pub const Runtime = struct {
             a.deinit();
             std.heap.page_allocator.destroy(a);
         }
+        if (self.font_data) |data| std.heap.page_allocator.free(data);
+        for (self.fallback_font_data.items) |data| std.heap.page_allocator.free(data);
+        self.fallback_font_data.deinit(std.heap.page_allocator);
         self.shm_buf.deinit();
         for (self.offer_mimes.items) |m| std.heap.page_allocator.free(m);
         self.offer_mimes.deinit(std.heap.page_allocator);
@@ -1344,6 +1371,17 @@ pub fn runWith(comptime A: type, app: *A, opts: Options) !void {
     try rt.runLoop(&vtable);
 }
 
+test "embedded default font loads without host font files" {
+    var atlas = try atlas_mod.TextAtlas.init(std.testing.allocator, default_font_data, 20);
+    defer atlas.deinit();
+    const glyph = try atlas.glyph('A');
+    try std.testing.expect(glyph.w > 0 and glyph.h > 0);
+    try std.testing.expect(default_font_license.len > 1000);
+}
+
+test "invalid explicit font data is rejected" {
+    try std.testing.expectError(error.NotSfnt, atlas_mod.TextAtlas.init(std.testing.allocator, "not a font", 20));
+}
 test "uriListToPaths decodes file:// URIs and percent escapes" {
     const data = "# comment\nfile:///home/sifr/My%20Music/song.flac\nfile:///tmp/a%2Bb.flac\nhttps://example.com/x\n";
     const out = try uriListToPaths(std.testing.allocator, data);

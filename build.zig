@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     root_mod.link_libc = true;
+    root_mod.addAnonymousImport("resources", .{ .root_source_file = b.path("resources.zig") });
 
     const exe = b.addExecutable(.{
         .name = "sifr",
@@ -32,12 +33,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     cipher_mod.link_libc = true;
+    cipher_mod.addAnonymousImport("resources", .{ .root_source_file = b.path("resources.zig") });
     const term_mod = b.addModule("term", .{
         .root_source_file = b.path("src/term_api.zig"),
         .target = target,
         .optimize = optimize,
     });
     term_mod.link_libc = true;
+    term_mod.addAnonymousImport("resources", .{ .root_source_file = b.path("resources.zig") });
     const audio_mod = b.addModule("audio", .{
         .root_source_file = b.path("src/audio_api.zig"),
         .target = target,
@@ -144,6 +147,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         mod.link_libc = true;
+        mod.addAnonymousImport("resources", .{ .root_source_file = b.path("resources.zig") });
         const tests = b.addTest(.{
             .root_module = mod,
         });

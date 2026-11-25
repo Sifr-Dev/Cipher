@@ -209,8 +209,11 @@ pub fn run(alloc: std.mem.Allocator, argv: []const []const u8) !u8 {
         \\```
         \\
         \\Requires Zig 0.17.1 and a Wayland session (XWayland not required).
-        \\Zero install step: the binary needs only the system Wayland loader and a
-        \\Vulkan ICD (software fallback: `CIPHER_FORCE_SOFTWARE=1`).
+        \\No Cipher runtime or installed font is required. The default font
+        \\and its OFL license are compiled into the executable. Platform
+        \\requirements are the system C loader, a Wayland session and its
+        \\libraries, and a Vulkan ICD for GPU acceleration (software fallback:
+        \\`CIPHER_FORCE_SOFTWARE=1`).
         \\
         \\The framework source this app builds against is at `{s}` (see
         \\`build.zig.zon`); re-point it there if you move the checkout.

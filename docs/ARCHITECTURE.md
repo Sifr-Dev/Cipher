@@ -41,8 +41,11 @@ commands, same layout.
 dlopen/dlsym modules). Hardware tests run against whatever ICD is active;
 `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json` selects lavapipe and
 `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` adds validation (clean).
-Evidence artifacts: `/tmp/sifr_frame.ppm`, `/tmp/sifr_text.ppm`,
-`/tmp/sifr_gpu_text.ppm`.
+Evidence artifacts are written into per-test `.zig-cache/tmp` directories,
+not fixed shared paths in `/tmp`. The default Instrument Sans font and its OFL
+license are compiled into applications through the package-root `resources`
+module. `Options.font_data` supplies borrowed embedded data;
+`Options.font_path` opts into a runtime-owned external file.
 
 ### Snapshot gate
 
@@ -51,9 +54,10 @@ Rendering regressions are caught by a deterministic software-shm snapshot:
 produces a reference frame (same font, same machine ⇒ byte-identical hash
 across runs). `zig build snapshot` regenerates the frame and checks it
 against `tests/golden/hello.sha256` with `snapdiff check`; exit 0 = match.
-The golden is font-rasterizer specific — if you change the font, rasterizer,
-or theme defaults, regenerate it with `snapdiff write` and eyeball the frame
-before committing. A mismatch fails the build. Verified 2026-11-19: the gate
+The golden is specific to the bundled font, rasterizer and compositor-provided
+window geometry — if you change the font, rasterizer, or theme defaults,
+regenerate it with `snapdiff write`, inspect the frame, and document the
+intentional visual change before committing. A mismatch fails the build. Verified 2026-11-19: the gate
 catches a font swap (exits 1) and passes after revert (exits 0).
 
 Requires a Wayland session (the software path still commits to wl_shm);

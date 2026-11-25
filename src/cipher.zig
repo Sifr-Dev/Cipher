@@ -9,6 +9,7 @@
 //!     try cipher.runtime.run(MyApp, &app);
 //! }
 //! ```
+pub const resources = @import("resources");
 pub const runtime = @import("framework/runtime.zig");
 pub const input = @import("framework/input.zig");
 pub const ui = @import("ui/ui.zig");
