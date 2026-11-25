@@ -505,7 +505,7 @@ pub const VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: u32 = 5;
 pub const VK_ACCESS_SHADER_READ_BIT: u32 = 0x00000020;
 pub const VK_FORMAT_R8_UNORM: u32 = 9;
 pub const VK_FORMAT_R32G32_SFLOAT: u32 = 103;
-pub const VK_FORMAT_R32G32B32A32_SFLOAT: u32 = 106;
+pub const VK_FORMAT_R32G32B32A32_SFLOAT: u32 = 109;
 pub const VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: u32 = 1;
 pub const VK_SAMPLER_FILTER_NEAREST: u32 = 0;
 pub const VK_SAMPLER_FILTER_LINEAR: u32 = 1;
@@ -1327,6 +1327,8 @@ pub const DeviceError = error{
 };
 
 test "Vulkan ABI values and queue-family layout match the C API" {
+    try std.testing.expectEqual(@as(u32, 103), VK_FORMAT_R32G32_SFLOAT);
+    try std.testing.expectEqual(@as(u32, 109), VK_FORMAT_R32G32B32A32_SFLOAT);
     try std.testing.expectEqual(@as(u32, 1000001001), VK_STRUCTURE_TYPE_PRESENT_INFO_KHR);
     try std.testing.expectEqual(@as(usize, 24), @sizeOf(VkPhysicalDeviceQueueFamilyProperties));
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(VkPhysicalDeviceQueueFamilyProperties, "queueFlags"));
