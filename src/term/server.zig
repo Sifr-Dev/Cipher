@@ -740,35 +740,51 @@ fn sockWriteAll(fd: i32, data: []const u8) !void {
     }
 }
 
+var test_read_buffer: [65536]u8 = undefined;
+var test_read_len: usize = 0;
+
 fn sockReadLine(fd: i32, allocator: std.mem.Allocator, timeout_ms: i32) !?[]u8 {
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(allocator);
-    var buf: [4096]u8 = undefined;
-    var remaining: i32 = timeout_ms;
-    while (remaining > 0) {
+    const start = pty_mod.nowNs();
+    const deadline = start + @as(i64, timeout_ms) * 1_000_000;
+    while (true) {
+        if (std.mem.indexOfScalar(u8, test_read_buffer[0..test_read_len], '\n')) |nl| {
+            const line = try allocator.dupe(u8, test_read_buffer[0..nl]);
+            std.mem.copyForwards(u8, test_read_buffer[0 .. test_read_len - nl - 1], test_read_buffer[nl + 1 .. test_read_len]);
+            test_read_len -= nl + 1;
+            return line;
+        }
+        if (test_read_len == test_read_buffer.len) return error.LineTooLong;
+        const now = pty_mod.nowNs();
+        if (now >= deadline) return null;
         var fds = [_]std.os.linux.pollfd{.{ .fd = fd, .events = std.os.linux.POLL.IN, .revents = 0 }};
-        const slice: i32 = 20;
-        const rc = std.os.linux.poll(&fds, 1, slice);
+        const wait_ms: i32 = @intCast(@min(20, @divTrunc(deadline - now, 1_000_000) + 1));
+        const rc = std.os.linux.poll(&fds, 1, wait_ms);
         if (@as(i64, @bitCast(rc)) < 0) {
             if (std.os.linux.errno(rc) == .INTR) continue;
             return error.PollFailed;
         }
-        remaining -= slice;
         if (rc == 0) continue;
-        const n_rc = std.os.linux.read(fd, &buf, buf.len);
-        if (@as(i64, @bitCast(n_rc)) < 0) return error.ReadFailed;
-        const n: usize = @intCast(n_rc);
-        if (n == 0) break;
-        if (std.mem.indexOfScalar(u8, buf[0..n], '\n')) |nl| {
-            try out.appendSlice(allocator, buf[0..nl]);
-            const r = try out.toOwnedSlice(allocator);
-            return r;
+        const n_rc = std.os.linux.read(fd, test_read_buffer[test_read_len..].ptr, test_read_buffer.len - test_read_len);
+        if (@as(i64, @bitCast(n_rc)) < 0) {
+            if (std.os.linux.errno(n_rc) == .INTR) continue;
+            return error.ReadFailed;
         }
-        try out.appendSlice(allocator, buf[0..n]);
+        const n: usize = @intCast(n_rc);
+        if (n == 0) return null;
+        test_read_len += n;
     }
-    if (out.items.len > 0) {
-        const r = try out.toOwnedSlice(allocator);
-        return r;
+}
+
+fn sockReadResponse(fd: i32, allocator: std.mem.Allocator, timeout_ms: i32) !?[]u8 {
+    const deadline = pty_mod.nowNs() + @as(i64, timeout_ms) * 1_000_000;
+    while (pty_mod.nowNs() < deadline) {
+        const remaining: i32 = @intCast(@divTrunc(deadline - pty_mod.nowNs(), 1_000_000) + 1);
+        const line = try sockReadLine(fd, allocator, remaining) orelse return null;
+        errdefer allocator.free(line);
+        const value = try json.Parser.parse(allocator, line);
+        defer json.freeValue(allocator, value);
+        if (value.get("event") == null) return line;
+        allocator.free(line);
     }
     return null;
 }
@@ -977,7 +993,7 @@ test "server e2e attach: replay ring + streamed output events, server survives" 
     }
     // server still alive afterwards
     try sockWriteAll(fd, "{\"op\":\"ls\"}\n");
-    const l2 = try sockReadLine(fd, alloc, 3000) orelse return error.NoReply;
+    const l2 = try sockReadResponse(fd, alloc, 3000) orelse return error.NoReply;
     defer alloc.free(l2);
     try std.testing.expect(std.mem.indexOf(u8, l2, "\"panes\"") != null);
     std.debug.print("E2E_ATTACH_SERVER_ALIVE_OK\n", .{});
