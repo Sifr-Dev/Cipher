@@ -5,8 +5,9 @@ Zig 0.17.1, Linux). Nanoui column = the hillclimb binary built from the
 2026-11-18 clone, run unmodified on this host (its `--only nanoui` scenes;
 `hillclimb/README.md` methodology: 30 warmup, 300 frames ×3, lowest median;
 our host-rendered CPU phases). Cipher column = `cipher-bench` (this repo,
-examples/bench), same host, same date, WSI present; per-300-measure window
-means, 3 repeats, warmup 30 frames excluded once per process._
+examples/bench), same host, same date, WSI present; per-300-frame window
+arithmetic means, three repeats, warmup 30 frames excluded once per process.
+The harness does not calculate a median or choose the best repeat._
 
 | scene | nanoui frame CPU (their labels: build+layout+paint) | cipher build+layout | cipher build+layout+encode | nanoui encode CPU |
 |---|---:|---:|---:|---:|
@@ -21,12 +22,30 @@ CPU-raster numbers above are the comparable ones.
 Repeat-to-repeat variance ≤ 2% per scene (build: 0.101–0.103 text,
 0.125–0.127 boxes, 0.055 dashboard; layout std ≤ 0.002).
 
+## Current shadowed-boxes measurement (2026-11-25)
+
+The scene now renders 600 moving rounded rectangles with shadows. It was
+rebuilt with `zig build -Doptimize=ReleaseSmall` and run on the same host and
+compositor with `CIPHER_FRAME_TIMING=1 ./zig-out/bin/cipher-bench --scene boxes`.
+These are arithmetic means over independent 300-frame windows after warmup:
+
+| Window | Build | Layout | Encode | Build+layout | Including encode | `render_ms` |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 0.162 ms | 0.042 ms | 0.006 ms | 0.204 ms | 0.210 ms | 6.747 ms |
+| 2 | 0.161 ms | 0.041 ms | 0.006 ms | 0.202 ms | 0.208 ms | 6.752 ms |
+| 3 | 0.159 ms | 0.042 ms | 0.005 ms | 0.201 ms | 0.206 ms | 6.738 ms |
+
+`render_ms` includes presentation synchronization and is not a GPU timestamp.
+The older `0.143 ms` boxes entry was for plain rectangles and is not comparable
+to this scene. No nanoui remeasurement or GPU/CPU superiority claim is made.
+
 ## What this does and does not prove
 
-**Does:** Cipher's CPU-side frame cost (view build + flexbox layout + quad
-construction) is ~2.0–2.3× lower than nanoui's on identical scenes, plus
-~15–150× lower encode CPU. Their encode number is the cost of software
-Gaussian shadows + blend rasterization; ours is a direct quad build.
+**Historical comparison:** in the older table, Cipher's CPU-side frame cost
+(view build + flexbox layout + quad construction) is ~2.0–2.3× lower than
+nanoui's on those older scenes, plus ~15–150× lower encode CPU. Their encode
+number is the cost of software Gaussian shadows + blend rasterization; ours is
+a direct quad build. This is not a claim about the remeasured shadowed scene.
 
 **Does not — stated plainly (owner correction applied, 2026-11-19):**
 0. **This host has no CPU graphics output.** All presentation is GPU; the
@@ -35,8 +54,10 @@ Gaussian shadows + blend rasterization; ours is a direct quad build.
 1. **Different work per scene.** Their labels carry real text machinery
    (grapheme clusters, wrap caches, composite glyphs) — ours are single-line
    plain labels. Their boxes include rounded corners and 8-sample Gaussian
-   shadows — **cipher has no rounded rects or shadows yet**; our boxes scene
-   issues plain colored rects. Their dashboard widgets are richer.
+   shadows. The current Cipher boxes scene has rounded rectangles and shadows
+   too, but its geometry and shadow filter are not identical to nanoui's. The
+   older `0.143 ms` plain-rectangle result must not be presented as the cost of
+   the current shadowed scene. See the remeasurement below.
 2. **Feature asymmetry cuts the other way too:** nanoui ships motion, IME,
    accessibility on Apple, webview, kit components, mobile. Cipher ships a
    terminal, a FLAC decoder, and a 12-widget kit. Neither suite's number
@@ -87,8 +108,8 @@ cd hillclimb && zig build run -- --scene text,boxes,dashboard --only nanoui
 
 ## Next measurement milestones
 
-- Same-window **rounded rect + shadow** in our toolkit, then re-measure boxes
-  (the honest apples-to-apples, requires new widget code)
+- Same-window **rounded rect + shadow** has been implemented and remeasured;
+  a comparison with identical competitor geometry and filtering is still needed.
 - GPU timestamps (VK_EXT_calibrated_timestamps / query pool) to fill our
   render_ms with GPU time, not vsync waits
 - Compositor matrix (umbriel/Mutter/KWin) + lavapipe software ICD

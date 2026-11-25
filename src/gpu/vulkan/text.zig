@@ -348,8 +348,8 @@ pub const GpuText = struct {
             .sType = d.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            .magFilter = d.VK_SAMPLER_FILTER_LINEAR,
-            .minFilter = d.VK_SAMPLER_FILTER_LINEAR,
+            .magFilter = d.VK_SAMPLER_FILTER_NEAREST,
+            .minFilter = d.VK_SAMPLER_FILTER_NEAREST,
             .mipmapMode = d.VK_SAMPLER_MIPMAP_MODE_NEAREST,
             .addressModeU = d.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
             .addressModeV = d.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
@@ -556,7 +556,7 @@ pub const GpuText = struct {
         };
         const cba = d.VkPipelineColorBlendAttachmentState{
             .blendEnable = 1,
-            .srcColorBlendFactor = 1, // VK_BLEND_FACTOR_ONE (premultiplied src)
+            .srcColorBlendFactor = 6, // VK_BLEND_FACTOR_SRC_ALPHA
             .dstColorBlendFactor = 7, // VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
             .colorBlendOp = 0, // VK_BLEND_OP_ADD
             .srcAlphaBlendFactor = 1, // VK_BLEND_FACTOR_ONE
@@ -675,7 +675,7 @@ pub const GpuText = struct {
         };
         if (vk.vkQueueSubmit(dev.queue, 1, &submit_info, self.fence) != d.VK_SUCCESS)
             return error.QueueSubmitFailed;
-        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), true, std.math.maxInt(u64)) != d.VK_SUCCESS)
+        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), d.VK_TRUE, std.math.maxInt(u64)) != d.VK_SUCCESS)
             return error.WaitFenceFailed;
     }
 
@@ -691,7 +691,7 @@ pub const GpuText = struct {
         }
         @memcpy(stage[2][0..data.len], data);
 
-        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), true, std.math.maxInt(u64)) != d.VK_SUCCESS)
+        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), d.VK_TRUE, std.math.maxInt(u64)) != d.VK_SUCCESS)
             return error.WaitFenceFailed;
         if (vk.vkResetFences(dev_handle, 1, @ptrCast(&self.fence)) != d.VK_SUCCESS)
             return error.ResetFenceFailed;
@@ -838,7 +838,7 @@ pub const GpuText = struct {
                 .srcAccessMask = d.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                 .dstAccessMask = d.VK_ACCESS_TRANSFER_READ_BIT,
                 .oldLayout = dump_final_layout,
-                .newLayout = dump_final_layout,
+                .newLayout = d.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 .srcQueueFamilyIndex = d.VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = d.VK_QUEUE_FAMILY_IGNORED,
                 .image = barrier_image,
@@ -858,7 +858,24 @@ pub const GpuText = struct {
                 .imageOffset = .{ .x = 0, .y = 0, .z = 0 },
                 .imageExtent = .{ .width = self.width, .height = self.height, .depth = 1 },
             };
-            vk.vkCmdCopyImageToBuffer(self.cmd, barrier_image, dump_final_layout, self.buffer, 1, @ptrCast(&copy));
+            vk.vkCmdCopyImageToBuffer(self.cmd, barrier_image, d.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, self.buffer, 1, @ptrCast(&copy));
+            if (dump_final_layout != d.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+                // Presentation requires its own layout even after a readback.
+                // Transfer reads must finish before the image is presented.
+                const present_barrier = d.VkImageMemoryBarrier{
+                    .sType = d.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    .pNext = null,
+                    .srcAccessMask = d.VK_ACCESS_TRANSFER_READ_BIT,
+                    .dstAccessMask = 0,
+                    .oldLayout = d.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    .newLayout = dump_final_layout,
+                    .srcQueueFamilyIndex = d.VK_QUEUE_FAMILY_IGNORED,
+                    .dstQueueFamilyIndex = d.VK_QUEUE_FAMILY_IGNORED,
+                    .image = barrier_image,
+                    .subresourceRange = subrange2,
+                };
+                vk.vkCmdPipelineBarrier(self.cmd, d.VK_PIPELINE_STAGE_TRANSFER_BIT, d.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, null, 0, null, 1, @ptrCast(&present_barrier));
+            }
         }
     }
 
@@ -870,7 +887,7 @@ pub const GpuText = struct {
         const n_verts = try self.fillVertices(quads);
 
         const frame = swap.frame_index % swapchain_mod.VK_MAX_FRAMES_IN_FLIGHT;
-        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), true, std.math.maxInt(u64)) != d.VK_SUCCESS)
+        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), d.VK_TRUE, std.math.maxInt(u64)) != d.VK_SUCCESS)
             return error.WaitFenceFailed;
         if (vk.vkResetFences(dev_handle, 1, @ptrCast(&self.fence)) != d.VK_SUCCESS)
             return error.ResetFenceFailed;
@@ -917,7 +934,7 @@ pub const GpuText = struct {
             return error.QueueSubmitFailed;
 
         if (std.c.getenv("CIPHER_DUMP_FRAME") != null) {
-            if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), true, std.math.maxInt(u64)) != d.VK_SUCCESS)
+            if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), d.VK_TRUE, std.math.maxInt(u64)) != d.VK_SUCCESS)
                 return error.WaitFenceFailed;
         }
 
@@ -931,7 +948,7 @@ pub const GpuText = struct {
         // Build the vertex array (2 triangles per quad).
         const n_verts = try self.fillVertices(quads);
 
-        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), true, std.math.maxInt(u64)) != d.VK_SUCCESS)
+        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), d.VK_TRUE, std.math.maxInt(u64)) != d.VK_SUCCESS)
             return error.WaitFenceFailed;
         if (vk.vkResetFences(dev_handle, 1, @ptrCast(&self.fence)) != d.VK_SUCCESS)
             return error.ResetFenceFailed;

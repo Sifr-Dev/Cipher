@@ -22,8 +22,7 @@ void main() {
     color = inColor;
     aux1 = inAux1;
     aux2 = inAux2;
-    // Pixel coords are y-down; with a positive-height viewport, NDC y=-1 is
-    // the top row, so y=0 (top) maps to -1.
+    // Pixel coordinates are transformed to normalized device coordinates.
     vec2 ndc = vec2(inPos.x / pc.extent.x * 2.0 - 1.0,
                     inPos.y / pc.extent.y * 2.0 - 1.0);
     gl_Position = vec4(ndc, 0.0, 1.0);

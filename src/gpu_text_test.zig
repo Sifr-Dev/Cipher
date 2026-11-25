@@ -174,3 +174,54 @@ test "GPU text: atlas upload + glyph quad renders exact pixels" {
     file.close(std.testing.io);
     std.debug.print("GPU_TEXT_PPM .zig-cache/tmp/{s}/gpu-text.ppm {d}x{d}\n", .{ tmp.sub_path, W, H });
 }
+
+test "GPU and software render the same quads within a small tolerance" {
+    const W: u32 = 160;
+    const H: u32 = 96;
+    const atlas_size: u32 = 16;
+    var atlas: [atlas_size * atlas_size]u8 = @splat(0);
+    atlas[0] = 255;
+    atlas[16 * 3 + 4] = 128;
+    atlas[16 * 4 + 4] = 255;
+
+    var vk = device.load() catch |e| {
+        std.debug.print("GPU_SKIP parity: {s}\n", .{@errorName(e)});
+        return;
+    };
+    var dev: device.Device = .{};
+    device.createDevice(&vk, &dev) catch |e| {
+        std.debug.print("GPU_SKIP parity: createDevice {s}\n", .{@errorName(e)});
+        return;
+    };
+    var gt = try text.GpuText.init(&vk, &dev, W, H, atlas_size, atlas_size);
+    defer gt.deinitSoft(&vk, &dev);
+    try gt.uploadAtlas(&vk, &dev, &atlas);
+
+    const scenes = [_][]const text.Quad{
+        &.{.{ .x = 10, .y = 10, .w = 100, .h = 70, .u0 = 0, .v0 = 0, .u1 = 0, .v1 = 0, .color = .{ 0.8, 0.4, 0.2, 1 } }},
+        &.{.{ .x = 12, .y = 12, .w = 8, .h = 8, .u0 = 0, .v0 = 0, .u1 = 1, .v1 = 1, .color = .{ 0.9, 0.8, 0.3, 1 } }},
+        &.{.{ .x = 10, .y = 10, .w = 100, .h = 70, .u0 = 2, .v0 = 2, .u1 = 2, .v1 = 2, .color = .{ 0.8, 0.4, 0.2, 0.5 }, .aux1 = .{ 60, 45, 30, 20 }, .aux2 = .{ 8, 10, 0.5, 4 } }},
+    };
+    for (scenes, 0..) |scene, scene_index| {
+        try gt.render(&vk, &dev, scene);
+        const gpu = gt.pixels();
+        var software: [W * H]u32 = @splat(0xFF04060B);
+        for (scene) |quad| @import("framework/runtime.zig").rasterQuad(&software, W, H, quad, &atlas, atlas_size, atlas_size);
+        var max_delta: u32 = 0;
+        var total_delta: u64 = 0;
+        var different: usize = 0;
+        for (software, 0..) |pixel, index| {
+            const channels = [3]u8{ @truncate(pixel & 0xff), @truncate((pixel >> 8) & 0xff), @truncate((pixel >> 16) & 0xff) };
+            for (channels, 0..) |channel, channel_index| {
+                const delta = @abs(@as(i32, channel) - @as(i32, gpu[index * 4 + channel_index]));
+                max_delta = @max(max_delta, delta);
+                total_delta += delta;
+            }
+            if (pixel != gpu[index * 4 + 0] | @as(u32, gpu[index * 4 + 1]) << 8 | @as(u32, gpu[index * 4 + 2]) << 16 | @as(u32, 0xff000000)) different += 1;
+        }
+        const mean_delta = @as(f64, @floatFromInt(total_delta)) / @as(f64, @floatFromInt(W * H * 3));
+        std.debug.print("RENDER_PARITY scene={d} mean_delta={d:.3} max_delta={d} different={d}\n", .{ scene_index, mean_delta, max_delta, different });
+        try std.testing.expect(mean_delta <= 0.5);
+        try std.testing.expect(max_delta <= 2);
+    }
+}
