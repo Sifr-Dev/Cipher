@@ -131,9 +131,18 @@ zig build -Doptimize=ReleaseSmall
 ```
 
 One binary in `zig-out/bin/`. On Wayland systems with a Vulkan ICD you have
-everything it needs; the binary itself carries only your app + the framework.
-Measured on this machine: `janus 312 KB`, `nocturne 349 KB`, `rex 216 KB`
-(ReleaseSmall, Zig 0.17.1, x86_64).
+everything it needs; the binary itself carries your app, the framework and the
+default font. Inspect the executable your build actually produces:
+
+```sh
+ls -lh zig-out/bin/my-app
+readelf -d zig-out/bin/my-app
+```
+
+On the tested Linux x86_64 configuration, the dynamic dependencies are the
+system C library and ELF loader; there is no separately installed Cipher,
+Zig, Qt or GTK runtime. The compositor, system libraries and applicable GPU
+driver remain platform requirements.
 
 Envs worth knowing: `CIPHER_MAX_FRAMES`, `CIPHER_DUMP_FRAME`,
 `CIPHER_FORCE_SOFTWARE=1`, `CIPHER_DISABLE_WSI=1`, `CIPHER_UI_HEIGHT`.
