@@ -198,6 +198,14 @@ pub const VkExtent3D = extern struct {
     depth: u32,
 };
 
+// Exact vulkan_core.h VkQueueFamilyProperties layout; there is no index field.
+pub const VkPhysicalDeviceQueueFamilyProperties = extern struct {
+    queueFlags: u32,
+    queueCount: u32,
+    timestampValidBits: u32,
+    minImageTransferGranularity: VkExtent3D,
+};
+
 pub const VkImageCreateInfo = extern struct {
     sType: u32,
     pNext: ?*const anyopaque,
@@ -844,7 +852,7 @@ pub const Vulkan = struct {
     // Instance/device lifecycle
     vkCreateInstance: *const fn (*const VkInstanceCreateInfo, ?*const anyopaque, *VkInstance) callconv(.c) VkResult,
     vkEnumeratePhysicalDevices: *const fn (VkInstance, *u32, ?[*]VkPhysicalDevice) callconv(.c) VkResult,
-    vkGetPhysicalDeviceQueueFamilyProperties: *const fn (VkPhysicalDevice, *u32, ?*const anyopaque) callconv(.c) void,
+    vkGetPhysicalDeviceQueueFamilyProperties: *const fn (VkPhysicalDevice, *u32, *VkPhysicalDeviceQueueFamilyProperties) callconv(.c) void,
     vkCreateDevice: *const fn (VkPhysicalDevice, *const VkDeviceCreateInfo, ?*const anyopaque, *VkDevice) callconv(.c) VkResult,
     vkGetDeviceQueue: *const fn (VkDevice, u32, u32, *VkQueue) callconv(.c) void,
     vkDestroyDevice: *const fn (VkDevice, ?*const anyopaque) callconv(.c) void,
@@ -866,11 +874,11 @@ pub const Vulkan = struct {
 
     // Images and memory
     vkCreateImage: *const fn (VkDevice, ?*const anyopaque, ?*const anyopaque, *VkImage) callconv(.c) VkResult,
-    vkGetImageMemoryRequirements: *const fn (VkDevice, VkImage, ?*const anyopaque) callconv(.c) void,
+    vkGetImageMemoryRequirements: *const fn (VkDevice, VkImage, *VkMemoryRequirements) callconv(.c) void,
     vkBindImageMemory: *const fn (VkDevice, VkImage, VkDeviceMemory, u64) callconv(.c) VkResult,
     vkCreateImageView: *const fn (VkDevice, ?*const anyopaque, ?*const anyopaque, *VkImageView) callconv(.c) VkResult,
     vkCreateBuffer: *const fn (VkDevice, ?*const anyopaque, ?*const anyopaque, *VkBuffer) callconv(.c) VkResult,
-    vkGetBufferMemoryRequirements: *const fn (VkDevice, VkBuffer, ?*const anyopaque) callconv(.c) void,
+    vkGetBufferMemoryRequirements: *const fn (VkDevice, VkBuffer, *VkMemoryRequirements) callconv(.c) void,
     vkBindBufferMemory: *const fn (VkDevice, VkBuffer, VkDeviceMemory, u64) callconv(.c) VkResult,
     vkAllocateMemory: *const fn (VkDevice, ?*const anyopaque, ?*const anyopaque, *VkDeviceMemory) callconv(.c) VkResult,
     vkMapMemory: *const fn (VkDevice, VkDeviceMemory, u64, u64, u32, **anyopaque) callconv(.c) VkResult,
@@ -1197,8 +1205,7 @@ pub fn createDevice(vulkan: *Vulkan, out: *Device) !void {
     }
 
     var device_count: u32 = 0;
-    if (vulkan.vkEnumeratePhysicalDevices(instance, &device_count, null) != VK_SUCCESS
-        or device_count == 0) {
+    if (vulkan.vkEnumeratePhysicalDevices(instance, &device_count, null) != VK_SUCCESS or device_count == 0) {
         vulkan.vkDestroyInstance(instance, null);
         return DeviceError.NoPhysicalDevices;
     }

@@ -10,21 +10,8 @@ const text_gpu = @import("gpu/vulkan/text.zig");
 const ui_mod = @import("ui/ui.zig");
 const atlas_mod = @import("ui/text/atlas.zig");
 
-const FONT_PATH = "/usr/share/fonts/liberation/LiberationSans-Regular.ttf";
+const resources = @import("resources");
 const UI_PX: f32 = 20;
-
-fn readFileAlloc(path: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0);
-    defer _ = std.c.close(fd);
-    const buf = try allocator.alloc(u8, 8 * 1024 * 1024);
-    var off: usize = 0;
-    while (off < buf.len) {
-        const n = try std.posix.read(fd, buf[off..]);
-        if (n == 0) break;
-        off += n;
-    }
-    return try allocator.realloc(buf, off);
-}
 
 /// 0xAARRGGBB -> linear-ish [4]f32 rgba for the GPU vertex color.
 fn rgba01(c: u32) [4]f32 {
@@ -54,6 +41,26 @@ fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out: []
                     .u1 = 0,
                     .v1 = 0,
                     .color = rgba01(r.color),
+                };
+                n += 1;
+            },
+            .shadow_rect => |s| {
+                if (n >= out.len) return error.TooManyQuads;
+                const margin = @max(s.aux[1] * 2.0, @abs(s.aux[3]) + 2.0) + 2.0;
+                const cx = s.rect.x + s.rect.w / 2.0;
+                const cy = s.rect.y + s.rect.h / 2.0;
+                out[n] = .{
+                    .x = s.rect.x - margin,
+                    .y = s.rect.y - margin,
+                    .w = s.rect.w + 2 * margin,
+                    .h = s.rect.h + 2 * margin,
+                    .u0 = 2,
+                    .v0 = 2,
+                    .u1 = 2,
+                    .v1 = 2,
+                    .color = rgba01(s.color),
+                    .aux1 = .{ cx, cy, s.rect.w / 2.0, s.rect.h / 2.0 },
+                    .aux2 = .{ s.aux[0], s.aux[1], s.aux[2], s.aux[3] },
                 };
                 n += 1;
             },
@@ -277,20 +284,20 @@ pub const Application = struct {
         if (device.load()) |v| {
             vk = v;
             if (device.createDevice(&vk, &dev)) |_| {
-                if (readFileAlloc(FONT_PATH, std.heap.page_allocator)) |font_data| {
-                    if (atlas_mod.TextAtlas.init(std.heap.page_allocator, font_data, UI_PX)) |a| {
-                        atlas = a;
-                        if (text_gpu.GpuText.init(&vk, &dev, width, height, a.atlas_w, a.atlas_h)) |g| {
-                            gt = g;
-                            gt.?.uploadAtlas(&vk, &dev, a.atlas) catch {
-                                gt = null;
-                            };
-                        } else |_| {}
-                    } else |_| {}
-                    if (gt != null) {
-                        ui = ui_mod.Ui.init(std.heap.page_allocator, &atlas.?);
-                    }
+                const a = atlas_mod.TextAtlas.init(std.heap.page_allocator, resources.default_font, UI_PX) catch |e| {
+                    std.debug.print("sifr: embedded font initialization failed: {s}\n", .{@errorName(e)});
+                    return error.FontLoadFailed;
+                };
+                atlas = a;
+                if (text_gpu.GpuText.init(&vk, &dev, width, height, a.atlas_w, a.atlas_h)) |g| {
+                    gt = g;
+                    gt.?.uploadAtlas(&vk, &dev, a.atlas) catch {
+                        gt = null;
+                    };
                 } else |_| {}
+                if (gt != null) {
+                    ui = ui_mod.Ui.init(std.heap.page_allocator, &atlas.?);
+                }
             } else |_| {}
         } else |_| {}
         const gpu_ui = ui != null and gt != null;

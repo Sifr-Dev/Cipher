@@ -5,6 +5,7 @@
     .minimum_zig_version = "0.17.1",
     .paths = .{
         "build.zig",
+        "resources.zig",
         "src",
         "examples",
         "assets",

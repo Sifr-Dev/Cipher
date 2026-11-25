@@ -231,17 +231,16 @@ test "atlas: measure + drawText produce expected ink; PPM evidence" {
     }
     var header_buf: [64]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buf, "P6\n{d} {d}\n255\n", .{ W, H });
-    const fd = try std.posix.openat(std.posix.AT.FDCWD, "/tmp/sifr_text.ppm", .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644);
-    defer _ = std.c.close(fd);
-    _ = std.c.write(fd, header.ptr, header.len);
-    // write in chunks via posix.write loop
-    var off: usize = 0;
-    while (off < ppm.len) {
-        const n = std.c.write(fd, ppm[off..].ptr, ppm.len - off);
-        if (n <= 0) break;
-        off += @as(usize, @intCast(n));
-    }
-    std.debug.print("TEXT_ATLAS_OK measure_H={d:.2} ink={d} brassish={d} ppm=/tmp/sifr_text.ppm\n", .{ m_h, ink, brassish });
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "text.ppm", .{});
+    var writer_buf: [4096]u8 = undefined;
+    var writer = file.writer(std.testing.io, &writer_buf);
+    try writer.interface.writeAll(header);
+    try writer.interface.writeAll(&ppm);
+    try writer.interface.flush();
+    file.close(std.testing.io);
+    std.debug.print("TEXT_ATLAS_OK measure_H={d:.2} ink={d} brassish={d} ppm=.zig-cache/tmp/{s}/text.ppm\n", .{ m_h, ink, brassish, tmp.sub_path });
 }
 
 test "glyphSafe: unmapped/astral codepoints never error, layout survives" {

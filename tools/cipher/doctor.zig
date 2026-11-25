@@ -110,7 +110,7 @@ pub fn run(alloc: std.mem.Allocator) !u8 {
     if (font_ok) {
         ok("font found", .{});
     } else {
-        warn("no known font found (apps fall back to the bundled default; install e.g. liberation-fonts or dejavu)", .{});
+        warn("no optional system font found; the built-in Instrument Sans font requires no installation", .{});
     }
 
     std.debug.print("\n", .{});

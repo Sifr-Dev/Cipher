@@ -16,8 +16,11 @@ which piece your machine is missing.
 - A **Vulkan ICD** matching your GPU (NVIDIA/AMD/Intel), or the software ICD
   (`vulkan-swrast` on Arch, `mesa-vulkan-drivers` on Debian) — cipher also
   runs with zero GPU via its wl_shm + software-raster fallback and it's fine
-- Fonts: any TTF (Liberation, DejaVu, JetBrains Mono…). Cipher falls back to
-  a default if not found.
+- **No installed font is required for the default UI.** Instrument Sans and
+  its SIL OFL license are compiled into every app. Use `Options.font_data` for
+  embedded SFNT bytes or `Options.font_path` for an explicit external font.
+  An explicitly supplied font must load successfully; it is never silently
+  replaced by a different fallback font.
 
 Platform support today: **Linux**. macOS/Windows ports do not exist yet —
 this document does not pretend otherwise.

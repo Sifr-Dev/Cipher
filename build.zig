@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     root_mod.link_libc = true;
+    root_mod.addAnonymousImport("resources", .{ .root_source_file = b.path("resources.zig") });
 
     const exe = b.addExecutable(.{
         .name = "sifr",
@@ -32,12 +33,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     cipher_mod.link_libc = true;
+    cipher_mod.addAnonymousImport("resources", .{ .root_source_file = b.path("resources.zig") });
     const term_mod = b.addModule("term", .{
         .root_source_file = b.path("src/term_api.zig"),
         .target = target,
         .optimize = optimize,
     });
     term_mod.link_libc = true;
+    term_mod.addAnonymousImport("resources", .{ .root_source_file = b.path("resources.zig") });
     const audio_mod = b.addModule("audio", .{
         .root_source_file = b.path("src/audio_api.zig"),
         .target = target,
@@ -66,6 +69,43 @@ pub fn build(b: *std.Build) void {
     // separate sifr-apps project, which consumes this framework by path —
     // this repo is the framework itself plus the hello example.
 
+    // cipher-bench — hillclimb-style benchmark scenes (examples/bench).
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("examples/bench/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_mod.link_libc = true;
+    bench_mod.addImport("cipher", cipher_mod);
+    const bench = b.addExecutable(.{ .name = "cipher-bench", .root_module = bench_mod });
+    b.installArtifact(bench);
+    const run_bench = b.addRunArtifact(bench);
+    run_bench.step.dependOn(b.getInstallStep());
+    b.step("run-bench", "Run the cipher benchmark (args after --)").dependOn(&run_bench.step);
+
+    // snapdiff — snapshot contract gate (software path is byte-deterministic).
+    const snap_mod = b.createModule(.{
+        .root_source_file = b.path("tools/snapdiff/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    snap_mod.link_libc = true;
+    const snap = b.addExecutable(.{ .name = "snapdiff", .root_module = snap_mod });
+    b.installArtifact(snap);
+
+    const hello_for_snap = b.addRunArtifact(hello);
+    hello_for_snap.setEnvironmentVariable("CIPHER_FORCE_SOFTWARE", "1");
+    hello_for_snap.setEnvironmentVariable("CIPHER_DUMP_FRAME", ".zig-cache/snapshot-hello.ppm");
+    hello_for_snap.setEnvironmentVariable("CIPHER_MAX_FRAMES", "3");
+    hello_for_snap.step.dependOn(b.getInstallStep());
+
+    const snap_check = b.addRunArtifact(snap);
+    snap_check.addArg("check");
+    snap_check.addArg(".zig-cache/snapshot-hello.ppm");
+    snap_check.addArg("tests/golden/hello.sha256");
+    snap_check.step.dependOn(&hello_for_snap.step);
+    b.step("snapshot", "Run the software-path snapshot gate against tests/golden/hello.sha256 (needs a Wayland session)").dependOn(&snap_check.step);
+
     // cipher — the framework's command-line tool (scaffold/build/run/doctor).
     const cipher_cli_mod = b.createModule(.{
         .root_source_file = b.path("tools/cipher/main.zig"),
@@ -93,6 +133,7 @@ pub fn build(b: *std.Build) void {
         .{ "src/ui/text/atlas.zig", "text_atlas" },
         .{ "src/ui/text/text_test.zig", "text_test" },
         .{ "src/ui_shim.zig", "ui_shim" },
+        .{ "src/ui/motion.zig", "ui_motion" },
         .{ "src/framework_shim.zig", "framework_shim" },
         .{ "src/term_shim.zig", "term_shim" },
         .{ "src/audio_shim.zig", "audio_shim" },
@@ -106,6 +147,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         mod.link_libc = true;
+        mod.addAnonymousImport("resources", .{ .root_source_file = b.path("resources.zig") });
         const tests = b.addTest(.{
             .root_module = mod,
         });

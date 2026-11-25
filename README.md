@@ -53,8 +53,8 @@ zig build run      # runs against the live Wayland compositor
 
 Requires Zig 0.17.1, a Wayland compositor (`WAYLAND_DISPLAY`,
 `XDG_RUNTIME_DIR`), and a Vulkan ICD for the GPU path (NVIDIA 620.70.06 and
-lavapipe both verified). A font at `/usr/share/fonts/liberation/LiberationSans-Regular.ttf`
-is used for text.
+lavapipe both verified). The default Instrument Sans font and its OFL license
+are compiled into each application; installed fonts are optional overrides.
 
 ## Build your own app
 
