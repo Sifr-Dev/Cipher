@@ -186,7 +186,9 @@ pub const Swapchain = struct {
         else
             d.VK_COMPOSITE_ALPHA_INHERITED_BIT_KHR;
 
-        const usage = d.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        // Readback is used only when CIPHER_DUMP_FRAME is requested. The
+        // image still needs TRANSFER_SRC usage at creation time.
+        const usage = d.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | d.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
         const sc_info = d.VkSwapchainCreateInfoKHR{
             .sType = d.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -345,6 +347,9 @@ pub const Swapchain = struct {
             .pResults = null,
         };
         const rc = vk.vkQueuePresentKHR(dev.queue, &present_info);
+        // Queue retirement waits for the present operation before semaphore
+        // reuse or destruction. GPU rendering itself remains asynchronous.
+        _ = vk.vkQueueWaitIdle(dev.queue);
         self.frame_index += 1;
         if (rc == d.VK_ERROR_OUT_OF_DATE_KHR or rc == d.VK_SUBOPTIMAL_KHR)
             return error.OutOfDate;
@@ -384,7 +389,7 @@ pub const Swapchain = struct {
             .imageColorSpace = self.color_space,
             .imageExtent = extent,
             .imageArrayLayers = 1,
-            .imageUsage = d.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .imageUsage = d.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | d.VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
             .imageSharingMode = d.VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = null,
