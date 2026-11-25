@@ -38,10 +38,10 @@ pub const Swapchain = struct {
     frame_index: u32 = 0,
     alloc: std.mem.Allocator,
 
-    fn createRenderPass(vk: *Vulkan, dev: *const Device) !d.VkRenderPass {
+    fn createRenderPass(vk: *Vulkan, dev: *const Device, format: u32) !d.VkRenderPass {
         const attachment = d.VkAttachmentDescription{
             .flags = 0,
-            .format = d.VK_FORMAT_R8G8B8A8_UNORM,
+            .format = format,
             .samples = d.VK_SAMPLE_COUNT_1_BIT,
             .loadOp = d.VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = d.VK_ATTACHMENT_STORE_OP_STORE,
@@ -118,8 +118,10 @@ pub const Swapchain = struct {
         if (vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(dev.physical, surface_handle, &caps) != d.VK_SUCCESS)
             return error.GetCapsFailed;
 
-        // Choose format: R8G8B8A8_UNORM preferred (matches the pipeline's
-        // attachment), then B8G8R8A8_UNORM, else SRGB variants, else ANY.
+        // Choose a supported surface format. Use it for the image views and
+        // render pass alike; a mismatched attachment format is invalid.
+        // Fragment shaders currently store B,G,R,A, so an RGBA surface has
+        // the same byte order as the software ARGB framebuffer.
         var format_count: u32 = 0;
         if (vk.vkGetPhysicalDeviceSurfaceFormatsKHR(dev.physical, surface_handle, &format_count, null) != d.VK_SUCCESS)
             return error.GetFormatsFailed;
@@ -184,7 +186,9 @@ pub const Swapchain = struct {
         else
             d.VK_COMPOSITE_ALPHA_INHERITED_BIT_KHR;
 
-        const usage = d.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        // Readback is used only when CIPHER_DUMP_FRAME is requested. The
+        // image still needs TRANSFER_SRC usage at creation time.
+        const usage = d.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | d.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
         const sc_info = d.VkSwapchainCreateInfoKHR{
             .sType = d.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -243,7 +247,7 @@ pub const Swapchain = struct {
         }
 
         // Render pass (pipeline-compatible with text.zig's; final layout PRESENT_SRC_KHR).
-        const render_pass = try createRenderPass(vk, dev);
+        const render_pass = try createRenderPass(vk, dev, chosen_format);
 
         // Framebuffers.
         const framebuffers = try alloc.alloc(d.VkFramebuffer, img_count);
@@ -343,6 +347,9 @@ pub const Swapchain = struct {
             .pResults = null,
         };
         const rc = vk.vkQueuePresentKHR(dev.queue, &present_info);
+        // Queue retirement waits for the present operation before semaphore
+        // reuse or destruction. GPU rendering itself remains asynchronous.
+        _ = vk.vkQueueWaitIdle(dev.queue);
         self.frame_index += 1;
         if (rc == d.VK_ERROR_OUT_OF_DATE_KHR or rc == d.VK_SUBOPTIMAL_KHR)
             return error.OutOfDate;
@@ -382,7 +389,7 @@ pub const Swapchain = struct {
             .imageColorSpace = self.color_space,
             .imageExtent = extent,
             .imageArrayLayers = 1,
-            .imageUsage = d.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .imageUsage = d.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | d.VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
             .imageSharingMode = d.VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = null,

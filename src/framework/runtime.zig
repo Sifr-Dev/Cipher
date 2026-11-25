@@ -98,16 +98,17 @@ pub fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out
             },
             .shadow_rect => |s| {
                 if (n >= out.len) return error.TooManyQuads;
-                // Inflate the quad by the shadow falloff so the SDF has room
-                // to feather: margin covers blur + drop offset + AA.
-                const margin = @max(s.aux[1] * 2.0, @abs(s.aux[3]) + 2.0) + 2.0;
+                // Cover the blur on every side, plus its vertical offset.
+                const margin_x = s.aux[1] * 2.0 + 2.0;
+                const margin_top = s.aux[1] * 2.0 + 2.0;
+                const margin_bottom = s.aux[1] * 2.0 + @abs(s.aux[3]) + 2.0;
                 const cx = s.rect.x + s.rect.w / 2.0;
                 const cy = s.rect.y + s.rect.h / 2.0;
                 out[n] = .{
-                    .x = s.rect.x - margin,
-                    .y = s.rect.y - margin,
-                    .w = s.rect.w + 2 * margin,
-                    .h = s.rect.h + 2 * margin,
+                    .x = s.rect.x - margin_x,
+                    .y = s.rect.y - margin_top,
+                    .w = s.rect.w + 2 * margin_x,
+                    .h = s.rect.h + margin_top + margin_bottom,
                     .u0 = 2, // sentinel: SDF path in the fragment shader
                     .v0 = 2,
                     .u1 = 2,
@@ -182,7 +183,7 @@ fn shadowCoverage(x: f32, y: f32, half_w: f32, half_h: f32, radius: f32, blur: f
 /// Blends source-over into the ARGB8888 (0xAARRGGBB) shm framebuffer.
 /// Used only when no Vulkan device is available (CIPHER_FORCE_SOFTWARE=1
 /// or headless/driverless sessions).
-fn rasterQuad(px: []u32, fb_w: u32, fb_h: u32, q: text_gpu.Quad, atlas: []const u8, atlas_w: u32, atlas_h: u32) void {
+pub fn rasterQuad(px: []u32, fb_w: u32, fb_h: u32, q: text_gpu.Quad, atlas: []const u8, atlas_w: u32, atlas_h: u32) void {
     const solid = q.u0 == 0 and q.v0 == 0 and q.u1 == 0 and q.v1 == 0;
     // Rounded rectangles use signed-distance coverage. Sampling the atlas
     // with sentinel UVs would instead create an opaque square.

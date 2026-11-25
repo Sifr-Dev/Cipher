@@ -422,7 +422,7 @@ pub const FramePipeline = struct {
     pub fn render(self: *FramePipeline, vk: *Vulkan, dev: *const Device, cx: u32, cy: u32, radius: u32) !void {
         const dev_handle = dev.device;
 
-        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), true, std.math.maxInt(u64)) != d.VK_SUCCESS)
+        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), d.VK_TRUE, std.math.maxInt(u64)) != d.VK_SUCCESS)
             return error.WaitFenceFailed;
         if (vk.vkResetFences(dev_handle, 1, @ptrCast(&self.fence)) != d.VK_SUCCESS)
             return error.ResetFenceFailed;
@@ -530,7 +530,7 @@ pub const FramePipeline = struct {
         };
         if (vk.vkQueueSubmit(dev.queue, 1, &submit_info, self.fence) != d.VK_SUCCESS)
             return error.QueueSubmitFailed;
-        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), true, std.math.maxInt(u64)) != d.VK_SUCCESS)
+        if (vk.vkWaitForFences(dev_handle, 1, @ptrCast(&self.fence), d.VK_TRUE, std.math.maxInt(u64)) != d.VK_SUCCESS)
             return error.WaitFenceFailed;
     }
 };

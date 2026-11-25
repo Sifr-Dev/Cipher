@@ -46,14 +46,16 @@ fn buildQuads(atlas: *atlas_mod.TextAtlas, cmds: []const ui_mod.DrawCmd, out: []
             },
             .shadow_rect => |s| {
                 if (n >= out.len) return error.TooManyQuads;
-                const margin = @max(s.aux[1] * 2.0, @abs(s.aux[3]) + 2.0) + 2.0;
+                const margin_x = s.aux[1] * 2.0 + 2.0;
+                const margin_top = s.aux[1] * 2.0 + 2.0;
+                const margin_bottom = s.aux[1] * 2.0 + @abs(s.aux[3]) + 2.0;
                 const cx = s.rect.x + s.rect.w / 2.0;
                 const cy = s.rect.y + s.rect.h / 2.0;
                 out[n] = .{
-                    .x = s.rect.x - margin,
-                    .y = s.rect.y - margin,
-                    .w = s.rect.w + 2 * margin,
-                    .h = s.rect.h + 2 * margin,
+                    .x = s.rect.x - margin_x,
+                    .y = s.rect.y - margin_top,
+                    .w = s.rect.w + 2 * margin_x,
+                    .h = s.rect.h + margin_top + margin_bottom,
                     .u0 = 2,
                     .v0 = 2,
                     .u1 = 2,
