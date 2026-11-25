@@ -25,8 +25,9 @@ pub const VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR: u32 = 0x0;
 pub const VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: u32 = 1000001002;
 pub const VK_SHARING_MODE_CONCURRENT: u32 = 1;
 pub const VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR: u32 = 1000001000;
-pub const VK_STRUCTURE_TYPE_PRESENT_INFO_KHR: u32 = 1000004001;
+pub const VK_STRUCTURE_TYPE_PRESENT_INFO_KHR: u32 = 1000001001;
 pub const VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR: u32 = 1000006000;
+pub const VK_QUEUE_GRAPHICS_BIT: u32 = 0x00000001;
 pub const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: u32 = 0;
 pub const VK_FORMAT_B8G8R8A8_UNORM: u32 = 44;
 pub const VK_FORMAT_R8G8B8A8_SRGB: u32 = 43;
@@ -852,7 +853,7 @@ pub const Vulkan = struct {
     // Instance/device lifecycle
     vkCreateInstance: *const fn (*const VkInstanceCreateInfo, ?*const anyopaque, *VkInstance) callconv(.c) VkResult,
     vkEnumeratePhysicalDevices: *const fn (VkInstance, *u32, ?[*]VkPhysicalDevice) callconv(.c) VkResult,
-    vkGetPhysicalDeviceQueueFamilyProperties: *const fn (VkPhysicalDevice, *u32, *VkPhysicalDeviceQueueFamilyProperties) callconv(.c) void,
+    vkGetPhysicalDeviceQueueFamilyProperties: *const fn (VkPhysicalDevice, *u32, ?[*]VkPhysicalDeviceQueueFamilyProperties) callconv(.c) void,
     vkCreateDevice: *const fn (VkPhysicalDevice, *const VkDeviceCreateInfo, ?*const anyopaque, *VkDevice) callconv(.c) VkResult,
     vkGetDeviceQueue: *const fn (VkDevice, u32, u32, *VkQueue) callconv(.c) void,
     vkDestroyDevice: *const fn (VkDevice, ?*const anyopaque) callconv(.c) void,
@@ -901,7 +902,7 @@ pub const Vulkan = struct {
     vkDestroySemaphore: *const fn (VkDevice, VkSemaphore, ?*const anyopaque) callconv(.c) void,
     vkCreateFence: *const fn (VkDevice, ?*const anyopaque, ?*const anyopaque, *VkFence) callconv(.c) VkResult,
     vkDestroyFence: *const fn (VkDevice, VkFence, ?*const anyopaque) callconv(.c) void,
-    vkWaitForFences: *const fn (VkDevice, u32, *const VkFence, bool, u64) callconv(.c) VkResult,
+    vkWaitForFences: *const fn (VkDevice, u32, *const VkFence, VkBool32, u64) callconv(.c) VkResult,
     vkResetFences: *const fn (VkDevice, u32, *const VkFence) callconv(.c) VkResult,
 
     // Memory properties and descriptor management
@@ -941,7 +942,8 @@ pub const Vulkan = struct {
     vkDestroySwapchainKHR: *const fn (VkDevice, VkSwapchainKHR, ?*const anyopaque) callconv(.c) void,
     vkGetSwapchainImagesKHR: *const fn (VkDevice, VkSwapchainKHR, *u32, ?*VkImage) callconv(.c) VkResult,
     vkAcquireNextImageKHR: *const fn (VkDevice, VkSwapchainKHR, u64, VkSemaphore, ?*anyopaque, *u32) callconv(.c) VkResult,
-    vkQueuePresentKHR: *const fn (VkQueue, *const anyopaque) callconv(.c) VkResult,
+    vkQueuePresentKHR: *const fn (VkQueue, *const VkPresentInfoKHR) callconv(.c) VkResult,
+    vkGetDeviceProcAddr: *const fn (VkDevice, [*:0]const u8) callconv(.c) ?*const anyopaque,
 };
 
 pub fn load() !Vulkan {
@@ -1038,7 +1040,7 @@ pub fn load() !Vulkan {
     const destroy_swapchain = std.c.dlsym(handle, "vkDestroySwapchainKHR") orelse return error.DlsymFailed;
     const get_swapchain_images = std.c.dlsym(handle, "vkGetSwapchainImagesKHR") orelse return error.DlsymFailed;
     const acquire_next_image = std.c.dlsym(handle, "vkAcquireNextImageKHR") orelse return error.DlsymFailed;
-    const queue_present = std.c.dlsym(handle, "vkQueuePresentKHR") orelse return error.DlsymFailed;
+    const queue_present = std.c.dlsym(handle, "vkGetDeviceProcAddr") orelse return error.DlsymFailed;
     const destroy_render_pass = std.c.dlsym(handle, "vkDestroyRenderPass") orelse return error.DlsymFailed;
     const destroy_framebuffer = std.c.dlsym(handle, "vkDestroyFramebuffer") orelse return error.DlsymFailed;
     const destroy_sampler = std.c.dlsym(handle, "vkDestroySampler") orelse return error.DlsymFailed;
@@ -1132,7 +1134,8 @@ pub fn load() !Vulkan {
         .vkDestroySwapchainKHR = @ptrCast(destroy_swapchain),
         .vkGetSwapchainImagesKHR = @ptrCast(get_swapchain_images),
         .vkAcquireNextImageKHR = @ptrCast(acquire_next_image),
-        .vkQueuePresentKHR = @ptrCast(queue_present),
+        .vkGetDeviceProcAddr = @ptrCast(queue_present),
+        .vkQueuePresentKHR = undefined,
         .vkDestroyRenderPass = @ptrCast(destroy_render_pass),
         .vkDestroyFramebuffer = @ptrCast(destroy_framebuffer),
         .vkDestroySampler = @ptrCast(destroy_sampler),
@@ -1220,7 +1223,20 @@ pub fn createDevice(vulkan: *Vulkan, out: *Device) !void {
     }
 
     const physical = devices[0];
-    const family_index: u32 = 0;
+    var family_count: u32 = 0;
+    vulkan.vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, null);
+    const families = std.heap.page_allocator.alloc(VkPhysicalDeviceQueueFamilyProperties, family_count) catch {
+        vulkan.vkDestroyInstance(instance, null);
+        return DeviceError.CreateDeviceFailed;
+    };
+    defer std.heap.page_allocator.free(families);
+    vulkan.vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, families.ptr);
+    const family_index: u32 = for (families, 0..) |family, index| {
+        if (family.queueCount > 0 and (family.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) break @intCast(index);
+    } else {
+        vulkan.vkDestroyInstance(instance, null);
+        return DeviceError.NoGraphicsQueue;
+    };
 
     const queue_priority: f32 = 1.0;
     const queue_info = VkDeviceQueueCreateInfo{
@@ -1290,6 +1306,14 @@ pub fn createDevice(vulkan: *Vulkan, out: *Device) !void {
         .queue = queue,
         .queue_family_index = family_index,
     };
+    // Present commands must be resolved for this device, not through a
+    // process-global symbol that may bypass the selected driver's trampoline.
+    const present = vulkan.vkGetDeviceProcAddr(device, "vkQueuePresentKHR") orelse {
+        vulkan.vkDestroyDevice(device, null);
+        vulkan.vkDestroyInstance(instance, null);
+        return DeviceError.CreateDeviceFailed;
+    };
+    vulkan.vkQueuePresentKHR = @ptrCast(present);
 }
 
 pub const DeviceError = error{
@@ -1299,7 +1323,17 @@ pub const DeviceError = error{
     NoPhysicalDevices,
     EnumerateDevicesFailed,
     CreateDeviceFailed,
+    NoGraphicsQueue,
 };
+
+test "Vulkan ABI values and queue-family layout match the C API" {
+    try std.testing.expectEqual(@as(u32, 1000001001), VK_STRUCTURE_TYPE_PRESENT_INFO_KHR);
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(VkPhysicalDeviceQueueFamilyProperties));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(VkPhysicalDeviceQueueFamilyProperties, "queueFlags"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(VkPhysicalDeviceQueueFamilyProperties, "queueCount"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(VkPhysicalDeviceQueueFamilyProperties, "timestampValidBits"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(VkPhysicalDeviceQueueFamilyProperties, "minImageTransferGranularity"));
+}
 
 test "creates Vulkan device and enumerates physical devices" {
     // Verifies Vulkan ICD integration. Requires a working Vulkan driver;
@@ -1319,7 +1353,13 @@ test "creates Vulkan device and enumerates physical devices" {
         return;
     };
 
-    try std.testing.expect(device.queue_family_index == 0);
+    var family_count: u32 = 0;
+    vulkan.vkGetPhysicalDeviceQueueFamilyProperties(device.physical, &family_count, null);
+    const families = try std.testing.allocator.alloc(VkPhysicalDeviceQueueFamilyProperties, family_count);
+    defer std.testing.allocator.free(families);
+    vulkan.vkGetPhysicalDeviceQueueFamilyProperties(device.physical, &family_count, families.ptr);
+    try std.testing.expect(device.queue_family_index < families.len);
+    try std.testing.expect((families[device.queue_family_index].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0);
 
     std.debug.print("Vulkan device created: queue_family={d}\n", .{device.queue_family_index});
 }
