@@ -86,10 +86,14 @@ pub const Server = struct {
         addr.family = std.os.linux.AF.UNIX;
         if (socket_path.len >= addr.path.len) return error.NameTooLong;
         @memcpy(addr.path[0..socket_path.len], socket_path);
+        var path_buf: [addr.path.len:0]u8 = @splat(0);
+        @memcpy(path_buf[0..socket_path.len], socket_path);
         const brc = std.os.linux.bind(fd, @ptrCast(&addr), @sizeOf(std.os.linux.sockaddr.un));
-        // owner-only socket: the pane stream is a control channel, keep it 0600
-        _ = std.os.linux.fchmod(fd, 0o600);
         if (@as(i64, @bitCast(brc)) < 0) return error.BindFailed;
+        // bind() creates a filesystem socket governed by umask. fchmod() on
+        // the descriptor would not protect that path; chmod the bound name.
+        const crc = std.os.linux.chmod(&path_buf, 0o600);
+        if (@as(isize, @bitCast(crc)) < 0) return error.ChmodFailed;
         const lrc = std.os.linux.listen(fd, 16);
         if (@as(i64, @bitCast(lrc)) < 0) return error.ListenFailed;
         return .{
@@ -630,6 +634,21 @@ fn drainReplies(srv: *Server, c: *Client) ![]u8 {
     const out = try srv.allocator.dupe(u8, c.out_buf.items);
     c.out_buf.clearRetainingCapacity();
     return out;
+}
+
+test "server: filesystem socket is accessible only to its owner" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try TestServer.init(alloc, &tmp);
+    defer fixture.deinit();
+    var info: std.os.linux.Statx = undefined;
+    const socket_z = try alloc.dupeSentinel(u8, fixture.server.socket_path, 0);
+    defer alloc.free(socket_z);
+    const rc = std.os.linux.statx(std.posix.AT.FDCWD, socket_z.ptr, 0, .{ .MODE = true }, &info);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    try std.testing.expectEqual(@as(u16, 0o600), info.mode & 0o777);
+    std.debug.print("SERVER_SOCKET_MODE_OK mode={o}\n", .{info.mode & 0o777});
 }
 
 test "server: spawn sh, run --wait captures output, ls/capture/close work" {
