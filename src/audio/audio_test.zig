@@ -158,3 +158,71 @@ test "flac decoder bit-exact vs flac+ffmpeg CLI fixtures (bps/rates/channels/lev
 fn readU32LE(b: []const u8) u32 {
     return @as(u32, b[0]) | (@as(u32, b[1]) << 8) | (@as(u32, b[2]) << 16) | (@as(u32, b[3]) << 24);
 }
+
+// Real-collection regression: right/side (channel assignment 9) stores the
+// side channel in subframe 0 with one extra bit of depth (RFC 9639 4.2).
+// Before this was fixed, every right/side frame misparsed into downstream
+// errors such as InvalidLpcPrecision. Force the encoder to pick right/side by
+// giving the model a strong left channel, and check the result is exact.
+test "flac right/side channel assignment is bit-exact" {
+    const alloc = std.testing.allocator;
+    const flac_bin = findOnPath(alloc, "flac") orelse {
+        std.debug.print("AUDIO_FLAC_SKIP flac CLI not on PATH\n", .{});
+        return;
+    };
+    const ffmpeg_bin = findOnPath(alloc, "ffmpeg") orelse {
+        std.debug.print("AUDIO_FLAC_SKIP ffmpeg CLI not on PATH\n", .{});
+        alloc.free(flac_bin);
+        return;
+    };
+    defer {
+        alloc.free(flac_bin);
+        alloc.free(ffmpeg_bin);
+    }
+    const pid3 = std.os.linux.getpid();
+    const dir = try std.fmt.allocPrint(alloc, "/tmp/cipher-{d}-flac-rs", .{pid3});
+    defer alloc.free(dir);
+    _ = try runCli(alloc, &.{ "/bin/mkdir", "-p", dir });
+    const wav_path = try std.fmt.allocPrint(alloc, "{s}/rs.wav", .{dir});
+    defer alloc.free(wav_path);
+    const flac_path = try std.fmt.allocPrint(alloc, "{s}/rs.flac", .{dir});
+    defer alloc.free(flac_path);
+    const raw_path = try std.fmt.allocPrint(alloc, "{s}/rs.s32", .{dir});
+    defer alloc.free(raw_path);
+
+    // left = quiet tone, right = same tone scaled up: the encoder prefers
+    // right/side because the side signal (left-right) costs fewer bits.
+    const frames: usize = 40000;
+    const rate: u32 = 44100;
+    const samples = try alloc.alloc(i64, frames * 2);
+    defer alloc.free(samples);
+    for (0..frames) |i| {
+        const t: f64 = @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(rate));
+        const v = @sin(2.0 * std.math.pi * 440.0 * t) * 0.85;
+        samples[i * 2 + 0] = @intFromFloat(v * 12000.0);
+        samples[i * 2 + 1] = @intFromFloat(v * 32000.0);
+    }
+    try wav.write(alloc, wav_path, rate, 2, 16, samples);
+
+    // -8 + explicit stereo search encourages right/side frames.
+    const rc1 = try runCli(alloc, &.{ flac_bin, "-f", "-s", "-8", "-e", "-p", "-o", flac_path, wav_path });
+    try std.testing.expectEqual(@as(u8, 0), rc1);
+
+    const rc2 = try runCli(alloc, &.{ ffmpeg_bin, "-y", "-loglevel", "error", "-i", flac_path, "-f", "s32le", "-c:a", "pcm_s32le", raw_path });
+    try std.testing.expectEqual(@as(u8, 0), rc2);
+    const raw = try wav.readFileAll(alloc, raw_path, 256 * 1024 * 1024);
+    defer alloc.free(raw);
+
+    var dec = try flac.decodeFile(alloc, flac_path);
+    defer dec.deinit();
+    try std.testing.expectEqual(samples.len, dec.samples.len);
+    {
+        const shift: u6 = @intCast(32 - dec.bits_per_sample);
+        for (dec.samples, 0..) |s, i| {
+            const got: i32 = @intCast(s << shift);
+            const want: i32 = @bitCast(readU32LE(raw[i * 4 ..][0..4]));
+            try std.testing.expectEqual(want, got);
+        }
+    }
+    std.debug.print("FLAC_RIGHTSIDE_OK samples={d} md5_ok={}\n", .{ dec.samples.len, dec.md5_ok });
+}
