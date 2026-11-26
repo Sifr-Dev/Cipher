@@ -3,6 +3,17 @@
 //! FIXED(0-4) / LPC(1-32) with Rice-partition residuals and wasted bits;
 //! left/side, right/side, mid/side decorrelation; frame CRC-16; STREAMINFO
 //! MD5 verification). No libraries — a plain MSB-first bit reader.
+//!
+//! Supported: native FLAC only (RFC 9639), mono..8ch independent, 8/12/16/20/24
+//! bit depths, all defined sample-rate codes, rice and rice2 residual coding,
+//! escape partitions and wasted bits. Verified bit-exact against ffmpeg on the
+//! real collection.
+//!
+//! Not supported (returns a specific error rather than guessing):
+//!   * Ogg-encapsulated FLAC (OggFLAC) — no `OggS` demuxer here.
+//!   * Files whose STREAMINFO MD5 is unset (`md5_ok` is then false by
+//!     construction; per-frame CRC-16 still validates the decode).
+//!   * Non-FLAC payloads with a .flac extension return error.NotFlac.
 const std = @import("std");
 const wav = @import("wav.zig");
 
@@ -172,7 +183,7 @@ fn parseFrameHeader(data: []const u8, pos: usize, si_rate: u32, si_bps: u8) !Fra
         2 => blocksize = 576,
         3 => blocksize = 1152,
         4 => blocksize = 2304,
-        5 => return error.ReservedBlocksize,
+        5 => blocksize = 4608,
         6 => blocksize = @as(u32, @intCast(try br.readBits(8))) + 1,
         7 => blocksize = @as(u32, @intCast(try br.readBits(16))) + 1,
         8...15 => blocksize = @as(u32, 256) << @as(u5, @intCast(bs_code - 8)),
@@ -288,14 +299,13 @@ fn decodeSubframe(br: *BitReader, out: []i64, blocksize: u32, bps: u8, residual_
         var i: u32 = order;
         while (i < blocksize) : (i += 1) {
             const r = residual_buf[i - order]; // residuals are packed from index 0
-            const s1 = out[i - 1];
             // wrapping arithmetic: FLAC predictors are defined modulo 2^N
             out[i] = switch (order) {
                 0 => r,
-                1 => r + s1,
-                2 => r +% 2 *% s1 -% out[i - 2],
-                3 => r +% 3 *% s1 -% 3 *% out[i - 2] +% out[i - 3],
-                4 => r +% 4 *% s1 -% 6 *% out[i - 2] +% 4 *% out[i - 3] -% out[i - 4],
+                1 => r +% out[i - 1],
+                2 => r +% 2 *% out[i - 1] -% out[i - 2],
+                3 => r +% 3 *% out[i - 1] -% 3 *% out[i - 2] +% out[i - 3],
+                4 => r +% 4 *% out[i - 1] -% 6 *% out[i - 2] +% 4 *% out[i - 3] -% out[i - 4],
                 else => unreachable,
             };
         }
@@ -392,15 +402,21 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) !Decoded {
         if (nch != channels_u32) return error.ChannelMismatch;
         const bs = hdr.blocksize;
         if (bs > 65536) return error.BlocksizeTooLarge;
-        var br = BitReader{ .data = data, .pos = (pos + hdr.header_len) * 8 };
+        var bt = BitReader{ .data = data, .pos = (pos + hdr.header_len) * 8 };
         var ch_data: [8][]i64 = undefined;
         var ci: u32 = 0;
         while (ci < nch) : (ci += 1) {
             ch_data[ci] = frame_buf[ci * 65536 ..][0..bs];
-            // RFC 9639 4.2: the side channel in left/side, right/side, mid/side
-            // carries one extra bit of depth
-            const ch_bps: u8 = if (hdr.channel_assignment >= 8 and ci == 1) hdr.bps + 1 else hdr.bps;
-            try decodeSubframe(&br, ch_data[ci], bs, ch_bps, residual_buf);
+            // RFC 9639 4.2: whichever slot holds the side channel carries one
+            // extra bit of depth. left/side and mid/side put it in subframe 1,
+            // right/side puts it in subframe 0.
+            const side_slot: ?u32 = switch (hdr.channel_assignment) {
+                8, 10 => 1,
+                9 => 0,
+                else => null,
+            };
+            const ch_bps: u8 = if (side_slot != null and ci == side_slot.?) hdr.bps + 1 else hdr.bps;
+            try decodeSubframe(&bt, ch_data[ci], bs, ch_bps, residual_buf);
         }
         // channel decorrelation
         var interleaved = try a.alloc(i64, bs * nch);
@@ -418,11 +434,11 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) !Decoded {
                     interleaved[i * 2 + 1] = left - side;
                 }
             },
-            9 => { // right/side: ch0=right, ch1=side
+            9 => { // right/side: ch0=side, ch1=right (RFC 9639 4.2)
                 for (0..bs) |i| {
-                    const right = ch_data[0][i];
-                    const side = ch_data[1][i];
-                    interleaved[i * 2 + 0] = right + side;
+                    const side = ch_data[0][i];
+                    const right = ch_data[1][i];
+                    interleaved[i * 2 + 0] = right +% side;
                     interleaved[i * 2 + 1] = right;
                 }
             },
@@ -438,10 +454,10 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) !Decoded {
             else => unreachable,
         }
         // frame CRC-16: align to byte, then 2 bytes over data[hdr.start .. aligned]
-        br.alignByte();
-        const frame_end = br.bytePos();
+        bt.alignByte();
+        const frame_end = bt.bytePos();
         const dbg = std.c.getenv("FLAC_DEBUG") != null;
-        if (dbg) std.debug.print("frame@{d} hdr_len={d} bs={d} subframe_end_byte={d} bits_used={d}\n", .{ pos, hdr.header_len, bs, frame_end, br.pos - pos * 8 });
+        if (dbg) std.debug.print("frame@{d} hdr_len={d} bs={d} subframe_end_byte={d} bits_used={d}\n", .{ pos, hdr.header_len, bs, frame_end, bt.pos - pos * 8 });
         if (frame_end + 2 <= data.len) {
             const want = (@as(u16, data[frame_end]) << 8) | data[frame_end + 1];
             const got = crc16(data[pos..frame_end]);
