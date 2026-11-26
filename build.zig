@@ -135,6 +135,7 @@ pub fn build(b: *std.Build) void {
         .{ "src/ui_shim.zig", "ui_shim" },
         .{ "src/ui/motion.zig", "ui_motion" },
         .{ "src/framework_shim.zig", "framework_shim" },
+        .{ "src/framework_ime_shim.zig", "framework_ime_shim" },
         .{ "src/term_shim.zig", "term_shim" },
         .{ "src/audio_shim.zig", "audio_shim" },
         .{ "src/gpu/vulkan/text.zig", "vulkan_text" },

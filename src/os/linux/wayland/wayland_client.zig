@@ -125,7 +125,7 @@ const wl_shm = opaque {};
 const wl_shm_pool = opaque {};
 const wl_buffer = opaque {};
 const wl_region = opaque {};
-const wl_surface = opaque {};
+pub const wl_surface = opaque {};
 const wl_seat = opaque {};
 const wl_keyboard = opaque {};
 const wl_pointer = opaque {};
@@ -138,6 +138,8 @@ const wl_data_source = opaque {};
 const xdg_wm_base = opaque {};
 const xdg_surface = opaque {};
 const xdg_toplevel = opaque {};
+pub const zwp_text_input_manager_v3 = opaque {};
+pub const zwp_text_input_v3 = opaque {};
 const xkb_context = opaque {};
 const xkb_keymap = opaque {};
 const xkb_state = opaque {};
@@ -226,6 +228,20 @@ const wl_data_source_listener = extern struct {
 const wl_callback_listener = extern struct {
     done: ?*const fn (?*anyopaque, *anyopaque, u32) callconv(.c) void = null,
 };
+// zwp_text_input_v3: the compositor acts as the input method. Signals land in
+// Connection.ime_events (see `ImeEvent`) rather than the u32-only facade queue,
+// because preedit and commit strings travel with them.
+pub const zwp_text_input_v3_listener = extern struct {
+    enter: ?*const fn (?*anyopaque, *zwp_text_input_v3, *wl_surface) callconv(.c) void = null,
+    leave: ?*const fn (?*anyopaque, *zwp_text_input_v3, *wl_surface) callconv(.c) void = null,
+    preedit_string: ?*const fn (?*anyopaque, *zwp_text_input_v3, ?[*:0]const u8, i32, i32) callconv(.c) void = null,
+    commit_string: ?*const fn (?*anyopaque, *zwp_text_input_v3, ?[*:0]const u8) callconv(.c) void = null,
+    delete_surrounding_text: ?*const fn (?*anyopaque, *zwp_text_input_v3, u32, u32) callconv(.c) void = null,
+    done: ?*const fn (?*anyopaque, *zwp_text_input_v3, u32) callconv(.c) void = null,
+    action: ?*const fn (?*anyopaque, *zwp_text_input_v3, u32, u32) callconv(.c) void = null,
+    language: ?*const fn (?*anyopaque, *zwp_text_input_v3, ?[*:0]const u8) callconv(.c) void = null,
+    preedit_hint: ?*const fn (?*anyopaque, *zwp_text_input_v3, u32, u32, u32) callconv(.c) void = null,
+};
 const wl_array = extern struct {
     size: usize,
     alloc: usize,
@@ -260,6 +276,8 @@ pub const xdg_toplevel_interface = wayland_tables.xdg_toplevel_interface;
 pub const wl_keyboard_interface = wayland_tables.wl_keyboard_interface;
 pub const wl_pointer_interface = wayland_tables.wl_pointer_interface;
 pub const wl_callback_interface = wayland_tables.wl_callback_interface;
+pub const zwp_text_input_manager_v3_interface = wayland_tables.zwp_text_input_manager_v3_interface;
+pub const zwp_text_input_v3_interface = wayland_tables.zwp_text_input_v3_interface;
 
 pub const Error = error{
     ConnectFailed,
@@ -300,6 +318,44 @@ pub const Event = struct {
         const s: i32 = @bitCast(self.read32(index));
         return @as(f64, @floatFromInt(s >> 8)) + @as(f64, @floatFromInt(s & 0xff)) / 256.0;
     }
+};
+
+/// One zwp_text_input_v3 signal, translated out of the C callback. Payload
+/// semantics per opcode are documented at `ImeOpcode`.
+pub const ImeEvent = struct {
+    opcode: ImeOpcode,
+    /// UTF-8 text for preedit_string / commit_string / language.
+    text: [4096]u8 = undefined,
+    text_len: usize = 0,
+    /// Numeric arguments, meaning depends on the opcode.
+    a: i32 = 0,
+    b: i32 = 0,
+    c: i32 = 0,
+
+    pub fn slice(self: *const ImeEvent) []const u8 {
+        return self.text[0..self.text_len];
+    }
+};
+
+pub const ImeOpcode = enum(u16) {
+    /// a = wl_surface token (-1 when the compositor sent a null surface).
+    enter = 0,
+    /// a = wl_surface token.
+    leave = 1,
+    /// text = preedit; a = cursor_begin, b = cursor_end (bytes, -1 = hidden).
+    preedit_string = 2,
+    /// text = committed UTF-8.
+    commit_string = 3,
+    /// a = bytes before the cursor, b = bytes after.
+    delete_surrounding_text = 4,
+    /// a = serial.
+    done = 5,
+    /// a = action (1 = submit), b = serial.
+    action = 6,
+    /// text = BCP 47 language tag.
+    language = 7,
+    /// a = start, b = end, c = hint.
+    preedit_hint = 8,
 };
 
 pub const ObjectIds = struct {
@@ -375,6 +431,7 @@ pub const Connection = struct {
     registry_token: u32 = 0,
     globals: std.ArrayList(Global) = .empty,
     events: std.ArrayList(Event) = .empty,
+    ime_events: std.ArrayList(ImeEvent) = .empty,
     ptr_tokens: std.AutoHashMap(u64, u32),
     token_ptrs: std.AutoHashMap(u32, u64),
     alloc: std.mem.Allocator,
@@ -400,6 +457,7 @@ pub const Connection = struct {
             .registry = undefined,
             .globals = .empty,
             .events = .empty,
+            .ime_events = .empty,
             .ptr_tokens = std.AutoHashMap(u64, u32).init(allocator),
             .token_ptrs = std.AutoHashMap(u32, u64).init(allocator),
             .alloc = allocator,
@@ -435,6 +493,7 @@ pub const Connection = struct {
         for (self.globals.items) |g| self.alloc.free(g.interface);
         self.globals.deinit(self.alloc);
         self.events.deinit(self.alloc);
+        self.ime_events.deinit(self.alloc);
         self.ptr_tokens.deinit();
         self.token_ptrs.deinit();
     }
@@ -543,6 +602,52 @@ pub const Connection = struct {
 
     pub fn clearEvents(self: *Connection) void {
         self.events.clearRetainingCapacity();
+        self.ime_events.clearRetainingCapacity();
+    }
+
+    // ---- generic marshalling (used by the text-input transport) ------------
+
+    /// Marshal a request that creates no new object. `args` is a tuple of the
+    /// request's wire arguments.
+    pub fn marshalVoid(self: *Connection, token: u32, opcode: u32, args: anytype) void {
+        const proxy = self.proxyFromToken(token) orelse return;
+        _ = @call(.auto, w.wl_proxy_marshal, .{ proxy, opcode } ++ args);
+    }
+
+    /// Marshal a constructor request (`new_id` first argument) and tokenize
+    /// the new proxy. Returns null when the proxy or object is unusable.
+    pub fn marshalConstructor(self: *Connection, token: u32, opcode: u32, iface: *const anyopaque, args: anytype) ?u32 {
+        const proxy = self.proxyFromToken(token) orelse return null;
+        const i: *const wl_interface = @alignCast(@ptrCast(iface));
+        const obj = @call(.auto, w.wl_proxy_marshal_flags, .{ proxy, opcode, i, self.versionOf(token), 0, @as(?*const anyopaque, null) } ++ args) orelse return null;
+        return self.tokenize(obj);
+    }
+
+    pub fn registerListener(self: *Connection, token: u32, listener: *const anyopaque) void {
+        const proxy = self.proxyFromToken(token) orelse return;
+        if (w.wl_proxy_add_listener(proxy, listener, @ptrCast(self)) != 0) {
+            std.debug.print("cipher: wl_proxy_add_listener failed for token {d}\n", .{token});
+        }
+    }
+
+    /// Destroy a proxy with an explicit destructor opcode.
+    pub fn destroyProxy(self: *Connection, token: u32, opcode: u32) void {
+        const proxy = self.proxyFromToken(token) orelse return;
+        _ = w.wl_proxy_marshal_flags(proxy, opcode, null, self.versionOf(token), WL_MARSHAL_FLAG_DESTROY);
+    }
+
+    /// Queue one text-input (IME) event for the runtime to drain.
+    pub fn pushImeEvent(self: *Connection, opcode: ImeOpcode, text: ?[]const u8, nums: []const i32) !void {
+        var ev = ImeEvent{ .opcode = opcode };
+        if (text) |t| {
+            const n = @min(t.len, ev.text.len);
+            @memcpy(ev.text[0..n], t[0..n]);
+            ev.text_len = n;
+        }
+        if (nums.len > 0) ev.a = nums[0];
+        if (nums.len > 1) ev.b = nums[1];
+        if (nums.len > 2) ev.c = nums[2];
+        try self.ime_events.append(self.alloc, ev);
     }
 
     pub fn roundtrip(self: *Connection) i32 {
