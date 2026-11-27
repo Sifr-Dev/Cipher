@@ -151,7 +151,6 @@ pub fn build(b: *std.Build) void {
         .{ "src/framework_ime_shim.zig", "framework_ime_shim" },
         .{ "src/term_shim.zig", "term_shim" },
         .{ "src/audio_shim.zig", "audio_shim" },
-        .{ "src/audio/sink_test.zig", "audio_sink" },
         .{ "src/gpu/vulkan/text.zig", "vulkan_text" },
         .{ "src/gpu_text_test.zig", "gpu_text_test" },
     };
