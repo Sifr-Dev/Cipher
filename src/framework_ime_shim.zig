@@ -4,4 +4,5 @@ test {
     _ = @import("framework/text_input.zig");
     _ = @import("os/linux/wayland/text_input.zig");
     _ = @import("framework/input.zig");
+    _ = @import("framework/text_field.zig");
 }

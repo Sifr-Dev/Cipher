@@ -57,6 +57,9 @@ pub const EditBuffer = struct {
     bytes: std.ArrayList(u8) = .empty,
     /// Display-only composition text (never part of `text()`).
     preedit_bytes: std.ArrayList(u8) = .empty,
+    preedit_cursor_begin: usize = 0,
+    preedit_cursor_end: usize = 0,
+    preedit_cursor_hidden: bool = true,
     cursor: usize = 0,
     anchor: usize = 0,
     history: std.ArrayList(Snapshot) = .empty,
@@ -65,6 +68,9 @@ pub const EditBuffer = struct {
     last_edit_key: u32 = 0,
     /// Set by mutations so callers know whether to notify the IME.
     dirty: bool = true,
+    /// Monotonic text revision, including undo/redo. Cursor-only changes are
+    /// observed separately by TextField.
+    revision: u64 = 0,
     /// Cause of the most recent change.
     last_cause: ChangeCause = .other,
     /// Last reported IME language (BCP 47 tag), for diagnostics.
@@ -158,6 +164,7 @@ pub const EditBuffer = struct {
         try self.captureState();
         self.last_edit_key = 0;
         self.dirty = true;
+        self.revision +%= 1;
         self.last_cause = .other;
     }
 
@@ -227,6 +234,7 @@ pub const EditBuffer = struct {
 
     fn recordEdit(self: *EditBuffer, key: u32, cause: ChangeCause) !void {
         self.dirty = true;
+        self.revision +%= 1;
         self.goal_column = null;
         self.last_cause = cause;
         if (key != 0 and key == self.last_edit_key and self.history.items.len > 0 and
@@ -236,6 +244,15 @@ pub const EditBuffer = struct {
             return;
         }
         self.last_edit_key = key;
+        // Establish the pre-edit baseline lazily for a new buffer. Without
+        // this, the first coalesced insert updates an empty tip snapshot and
+        // there is no state to which undo can return.
+        if (self.history.items.len == 0) {
+            const baseline = try self.allocator.dupe(u8, "");
+            errdefer self.allocator.free(baseline);
+            try self.history.append(self.allocator, .{ .text = baseline, .cursor = 0, .anchor = 0 });
+            self.history_index = 0;
+        }
         // Undo is best effort: a failed snapshot must never fail the edit.
         self.captureState() catch {
             self.last_edit_key = 0;
@@ -266,6 +283,8 @@ pub const EditBuffer = struct {
         self.anchor = @min(s.anchor, self.bytes.items.len);
         self.last_edit_key = 0;
         self.dirty = true;
+        self.revision +%= 1;
+        self.last_cause = .other;
         return true;
     }
 
@@ -512,38 +531,104 @@ pub const EditBuffer = struct {
 
     /// Replace the pre-edit string. Display-only: the buffer is untouched.
     pub fn setPreedit(self: *EditBuffer, value: []const u8) !void {
-        self.preedit_bytes.clearRetainingCapacity();
-        try self.preedit_bytes.appendSlice(self.allocator, value);
+        try self.setPreeditCursor(value, -1, -1);
+    }
+
+    pub fn setPreeditCursor(self: *EditBuffer, value: []const u8, begin: i32, end: i32) !void {
+        if (begin < -1 or end < -1 or begin > end) return error.InvalidPreeditCursor;
+        const hidden = begin == -1;
+        const b: usize = if (hidden) 0 else @intCast(begin);
+        const e: usize = if (hidden) 0 else @intCast(end);
+        if (!hidden and (e > value.len or !std.unicode.utf8ValidateSlice(value) or
+            (b > 0 and !grapheme.isCodepointBoundary(value, b)) or
+            (e > 0 and !grapheme.isCodepointBoundary(value, e)))) return error.InvalidPreeditCursor;
+        try self.preedit_bytes.replaceRange(self.allocator, 0, self.preedit_bytes.items.len, value);
+        self.preedit_cursor_begin = b;
+        self.preedit_cursor_end = e;
+        self.preedit_cursor_hidden = hidden;
     }
 
     pub fn preedit(self: *const EditBuffer) []const u8 {
         return self.preedit_bytes.items;
     }
 
+    pub fn preeditCursor(self: *const EditBuffer) struct { begin: usize, end: usize, hidden: bool } {
+        return .{ .begin = self.preedit_cursor_begin, .end = self.preedit_cursor_end, .hidden = self.preedit_cursor_hidden };
+    }
+
     /// Commit an IME string: delete `before` bytes before and `after` bytes
     /// after the cursor, then insert the committed text. Byte counts that
     /// land inside a cluster are widened outward so the buffer stays valid.
     pub fn commitIme(self: *EditBuffer, committed: []const u8, before: usize, after: usize) !void {
-        try self.setPreedit("");
-        const buf = self.bytes.items;
-        var start = @min(self.cursor, buf.len);
-        var remaining_before = before;
-        while (remaining_before > 0 and start > 0) {
-            const prev = grapheme.prevBoundary(buf, start);
-            remaining_before -|= start - prev;
-            start = prev;
+        return self.applyIme(committed, before, after, "", -1, -1);
+    }
+
+    /// Apply one complete text-input-v3 `done` transaction: delete around the
+    /// committed-text cursor, insert the commit, then set the new preedit.
+    /// No partial mutation occurs when preedit allocation/validation fails.
+    pub fn applyIme(self: *EditBuffer, committed: []const u8, before: usize, after: usize, preedit_value: []const u8, preedit_begin: i32, preedit_end: i32) !void {
+        if (preedit_begin < -1 or preedit_end < -1 or preedit_begin > preedit_end) return error.InvalidPreeditCursor;
+        const hidden = preedit_begin == -1;
+        const pb: usize = if (hidden) 0 else @intCast(preedit_begin);
+        const pe: usize = if (hidden) 0 else @intCast(preedit_end);
+        if (!hidden and (pe > preedit_value.len or !std.unicode.utf8ValidateSlice(preedit_value) or
+            (pb > 0 and !grapheme.isCodepointBoundary(preedit_value, pb)) or
+            (pe > 0 and !grapheme.isCodepointBoundary(preedit_value, pe)))) return error.InvalidPreeditCursor;
+
+        var next = std.ArrayList(u8).empty;
+        errdefer next.deinit(self.allocator);
+        var next_cursor = self.cursor;
+        var next_anchor = self.anchor;
+        if (committed.len > 0 or before > 0 or after > 0 or self.hasSelection()) {
+            const old = self.bytes.items;
+            var start = @min(self.cursor, old.len);
+            var remaining_before = before;
+            while (remaining_before > 0 and start > 0) {
+                const prev = grapheme.prevBoundary(old, start);
+                remaining_before -|= start - prev;
+                start = prev;
+            }
+            var end = @min(self.cursor, old.len);
+            var remaining_after = after;
+            while (remaining_after > 0 and end < old.len) {
+                const following = grapheme.nextBoundary(old, end);
+                remaining_after -|= following - end;
+                end = following;
+            }
+            const new_len = old.len - (end - start) + committed.len;
+            if (new_len > MAX_TEXT) return error.TooLarge;
+            try next.ensureTotalCapacity(self.allocator, new_len);
+            try next.appendSlice(self.allocator, old[0..start]);
+            try next.appendSlice(self.allocator, committed);
+            try next.appendSlice(self.allocator, old[end..]);
+            next_cursor = start + committed.len;
+            next_anchor = next_cursor;
+        } else {
+            try next.appendSlice(self.allocator, self.bytes.items);
         }
-        var end = @min(self.cursor, buf.len);
-        var remaining_after = after;
-        while (remaining_after > 0 and end < buf.len) {
-            const next = grapheme.nextBoundary(buf, end);
-            remaining_after -|= next - end;
-            end = next;
+        if (preedit_value.len > 0) {
+            // Allocation is fallible; keep the current edit state intact on
+            // failure. The actual preedit storage is replaced separately
+            // after the text edit has a stable new allocation.
+            var check = std.ArrayList(u8).empty;
+            defer check.deinit(self.allocator);
+            try check.appendSlice(self.allocator, preedit_value);
         }
-        self.anchor = start;
-        self.cursor = end;
-        try self.replaceSelection(committed);
-        try self.recordEdit(0, .input_method);
+        var new_preedit = std.ArrayList(u8).empty;
+        errdefer new_preedit.deinit(self.allocator);
+        try new_preedit.appendSlice(self.allocator, preedit_value);
+
+        const changed = !std.mem.eql(u8, next.items, self.bytes.items);
+        self.bytes.deinit(self.allocator);
+        self.bytes = next;
+        self.preedit_bytes.deinit(self.allocator);
+        self.preedit_bytes = new_preedit;
+        self.preedit_cursor_begin = pb;
+        self.preedit_cursor_end = pe;
+        self.preedit_cursor_hidden = hidden;
+        self.cursor = next_cursor;
+        self.anchor = next_anchor;
+        if (changed) try self.recordEdit(0, .input_method);
     }
 };
 

@@ -4,6 +4,7 @@
 const std = @import("std");
 const font = @import("font.zig");
 const raster = @import("raster.zig");
+const grapheme = @import("grapheme.zig");
 
 pub const GlyphInfo = struct {
     atlas_x: u32,
@@ -214,6 +215,36 @@ pub const TextAtlas = struct {
             i += d.len;
         }
         return w;
+    }
+
+    /// Logical-pixel width when `scale` is the UI's device-pixel scale.
+    pub fn measureWidth(self: *TextAtlas, text: []const u8) f32 {
+        return (self.measure(text) catch 0) / @max(self.scale, 0.0001);
+    }
+
+    /// Grapheme-cluster index nearest a logical x position. Each cluster is
+    /// hit at its midpoint; combining sequences cannot split the caret.
+    pub fn clusterIndexAt(self: *TextAtlas, text: []const u8, x: f32) usize {
+        if (x <= 0) return 0;
+        var pen: f32 = 0;
+        var i: usize = 0;
+        var index: usize = 0;
+        while (i < text.len) : (index += 1) {
+            const len = grapheme.clusterLen(text[i..]);
+            const next = pen + self.measureWidth(text[i .. i + len]);
+            if (x < pen + (next - pen) / 2) return index;
+            pen = next;
+            i += len;
+        }
+        return index;
+    }
+
+    /// Byte offset of the nearest caret in a single text line.
+    pub fn cursorByteAt(self: *TextAtlas, text: []const u8, x: f32) usize {
+        var i: usize = 0;
+        var index = self.clusterIndexAt(text, x);
+        while (index > 0 and i < text.len) : (index -= 1) i += grapheme.clusterLen(text[i..]);
+        return i;
     }
 
     /// Draw text with source-over blending into an ARGB8888 u32 framebuffer.

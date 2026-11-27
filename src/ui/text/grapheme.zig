@@ -193,6 +193,13 @@ pub fn floorBoundary(s: []const u8, byte_index: usize) usize {
     return i;
 }
 
+/// True when `byte_index` is the start of a UTF-8 codepoint or the end of
+/// the string. Grapheme boundaries additionally exclude positions inside a
+/// composed cluster; protocol preedit cursors are codepoint-relative.
+pub fn isCodepointBoundary(s: []const u8, byte_index: usize) bool {
+    return byte_index <= s.len and (byte_index == s.len or s[byte_index] & 0xC0 != 0x80);
+}
+
 /// ASCII fast path used by measurement code: codepoint count when the string
 /// is pure ASCII, null otherwise.
 pub fn asciiLen(s: []const u8) ?usize {

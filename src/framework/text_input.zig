@@ -104,6 +104,9 @@ pub const Session = struct {
     have_surrounding: bool = false,
     /// Number of `commit` requests issued; compositors echo it in `done`.
     commits: u32 = 0,
+    /// Why the surrounding text changed. The protocol resets this to
+    /// `input_method` after every commit.
+    cause: ChangeCause = .input_method,
     /// Set when any pending state exists that needs a commit.
     pending: bool = false,
     /// Latest language reported by the compositor (BCP 47).
@@ -139,6 +142,20 @@ pub const Session = struct {
         }
     }
 
+    /// A stale `done` serial must not prevent edits from being applied. It
+    /// does, however, require all client state to be sent again before normal
+    /// updates resume.
+    pub fn noteDone(self: *Session, serial: u32) void {
+        if (!self.doneMatches(serial)) self.pending = true;
+    }
+
+    /// Stop outbound updates after the surface loses text-input focus. A
+    /// logical field blur may still send disable + commit before this arrives.
+    pub fn invalidateAfterLeave(self: *Session) void {
+        self.setFocus(false);
+        self.pending = false;
+    }
+
     /// Field acquired logical focus: request enable with the current state.
     pub fn enableField(self: *Session, purpose: Purpose, hint: Hint) void {
         self.enabled = true;
@@ -154,13 +171,55 @@ pub const Session = struct {
         self.pending = true;
     }
 
+    /// Byte offsets of a protocol-safe surrounding-text window. Both text
+    /// endpoints and cursor/anchor positions remain on codepoint boundaries;
+    /// selection is retained whenever it intersects the window.
+    pub fn surroundingWindow(text: []const u8, cursor_in: usize, anchor_in: usize, max_bytes: usize) struct { start: usize, end: usize, cursor: usize, anchor: usize } {
+        const cap = @min(max_bytes, text.len);
+        if (cap == 0) return .{ .start = 0, .end = 0, .cursor = 0, .anchor = 0 };
+        const cursor = @min(cursor_in, text.len);
+        const anchor = @min(anchor_in, text.len);
+        const lo = @min(cursor, anchor);
+        const hi = @max(cursor, anchor);
+        if (cursor == hi) {
+            const start = codepointCeil(text, hi -| cap);
+            const end = codepointFloor(text, start + cap);
+            if (hi <= end) return .{ .start = start, .end = end, .cursor = cursor - start, .anchor = lo - start };
+            const safe_end = codepointFloor(text, hi);
+            return .{ .start = safe_end, .end = safe_end, .cursor = 0, .anchor = 0 };
+        }
+        const end = codepointFloor(text, lo + cap);
+        const start = codepointFloor(text, end -| cap);
+        if (lo >= start and hi <= end) return .{ .start = start, .end = end, .cursor = cursor - start, .anchor = anchor - start };
+        const safe_start = codepointFloor(text, lo);
+        const safe_end = codepointFloor(text, safe_start + cap);
+        return .{ .start = safe_start, .end = safe_end, .cursor = cursor - safe_start, .anchor = 0 };
+    }
+
+    fn codepointFloor(text: []const u8, index: usize) usize {
+        var i = @min(index, text.len);
+        while (i > 0 and i < text.len and text[i] & 0xC0 == 0x80) i -= 1;
+        return i;
+    }
+
+    fn codepointCeil(text: []const u8, index: usize) usize {
+        var i = @min(index, text.len);
+        while (i < text.len and text[i] & 0xC0 == 0x80) i += 1;
+        return i;
+    }
+
     pub fn setSurrounding(self: *Session, text: []const u8, cursor: usize, anchor: usize) void {
-        // Protocol: text is limited by the Wayland message size; callers pass
-        // a window, not the whole document.
-        self.surrounding = if (text.len > 4000) text[0..4000] else text;
+        // Callers provide a protocol-sized, codepoint-aligned window.
+        self.surrounding = text;
         self.surrounding_cursor = @min(cursor, self.surrounding.len);
         self.surrounding_anchor = @min(anchor, self.surrounding.len);
         self.have_surrounding = true;
+        self.pending = true;
+    }
+
+    pub fn setChangeCause(self: *Session, cause: ChangeCause) void {
+        if (self.cause == cause) return;
+        self.cause = cause;
         self.pending = true;
     }
 
@@ -179,11 +238,11 @@ pub const Session = struct {
     /// Produce the ordered request batch for the current pending state and
     /// mark it committed. The caller sends them in order, then flushes.
     pub fn flush(self: *Session, out: *std.ArrayList(Request), allocator: std.mem.Allocator) !void {
-        if (!self.pending) return;
+        if (!self.pending or (self.enabled and !self.has_focus)) return;
         if (self.enabled) {
             try out.append(allocator, .enable);
-            try out.append(allocator, .{ .content_type = .{ .hint = self.hint.bits(), .purpose = @intFromEnum(self.purpose) } });
-            try out.append(allocator, .{ .change_cause = .other });
+            try out.append(allocator, .{ .content_type = .{ .hint = self.hint.bits(), .purpose = @backingInt(self.purpose) } });
+            try out.append(allocator, .{ .change_cause = self.cause });
             if (self.have_surrounding) {
                 try out.append(allocator, .{ .surrounding = .{
                     .text = self.surrounding,
@@ -203,6 +262,7 @@ pub const Session = struct {
         try out.append(allocator, .commit);
         self.commits +%= 1;
         self.pending = false;
+        self.cause = .input_method;
     }
 
     /// Serial from the `done` event is the number of commits the compositor
@@ -258,7 +318,7 @@ test "flush: enable sends content type, surrounding, cursor rect, then commit" {
     try s.flush(&list, std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 6), list.items.len);
     try std.testing.expect(list.items[0] == .enable);
-    try std.testing.expectEqual(Purpose.email, @as(Purpose, @enumFromInt(list.items[1].content_type.purpose)));
+    try std.testing.expectEqual(Purpose.email, @as(Purpose, @fromBackingInt(@intCast(list.items[1].content_type.purpose))));
     try std.testing.expect(list.items[1].content_type.hint & 0x2 != 0);
     try std.testing.expect(list.items[2] == .change_cause);
     try std.testing.expectEqualStrings("user@host", list.items[3].surrounding.text);

@@ -12,6 +12,8 @@
 pub const resources = @import("resources");
 pub const runtime = @import("framework/runtime.zig");
 pub const input = @import("framework/input.zig");
+pub const text_field = @import("framework/text_field.zig");
+pub const TextField = text_field.TextField;
 pub const ui = @import("ui/ui.zig");
 pub const widgets = @import("ui/widgets.zig");
 pub const layout = @import("ui/layout.zig");

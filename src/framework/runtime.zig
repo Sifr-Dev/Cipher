@@ -14,6 +14,9 @@ const atlas_mod = @import("../ui/text/atlas.zig");
 const ui_mod = @import("../ui/ui.zig");
 const layout_mod = @import("../ui/layout.zig");
 const input = @import("input.zig");
+const text_input = @import("../os/linux/wayland/text_input.zig");
+const text_field_mod = @import("text_field.zig");
+const text_controller = @import("text_controller.zig");
 
 /// Instrument Sans, distributed with its OFL license in `assets/`.
 /// Compiled into each app so a default UI never depends on installed fonts.
@@ -356,6 +359,10 @@ pub const Runtime = struct {
     pointer: ?u32 = null,
     data_device: ?u32 = null,
     data_source: ?u32 = null,
+    ime: ?text_input.TextInput = null,
+    text_controller: text_controller.Controller = .{},
+    ime_surface_focused: bool = false,
+    raw_ime_events: bool = false,
 
     width: u32, // device pixels (logical * scale)
     height: u32,
@@ -397,6 +404,7 @@ pub const Runtime = struct {
     offer_mimes: std.ArrayList([]u8),
     pending_offer: ?u32 = null,
     clipboard_text: ?[]u8 = null,
+    clipboard_requested: bool = false,
 
     // frame loop
     quit: bool = false,
@@ -615,6 +623,18 @@ pub const Runtime = struct {
         if (self.swapchain != null and self.gt == null)
             std.debug.print("cipher: WARNING: GPU text pipeline unavailable; presenting via CPU raster (GPU path disabled)\n", .{});
 
+        // Bind after the initial configure sequence. Keyboard editing remains
+        // available when a compositor does not advertise text-input-v3.
+        if (self.conn.findGlobal("zwp_text_input_manager_v3") != null) {
+            self.ime = text_input.TextInput.create(self.conn, self.ids.seat.?) catch |e| blk: {
+                std.debug.print("cipher: text-input-v3 unavailable: {s}\n", .{@errorName(e)});
+                break :blk null;
+            };
+            if (self.ime) |ime| {
+                self.ids.text_input_manager = ime.manager;
+                self.ids.text_input = ime.object;
+            }
+        }
         self.conn.setNonBlocking();
         return self;
     }
@@ -701,6 +721,8 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
+        if (self.ime) |*ime| ime.destroy();
+        self.text_controller.deinit(std.heap.page_allocator);
         if (self.keyboard) |id| wayland.keyboardRelease(self.conn, id);
         if (self.pointer) |id| wayland.pointerRelease(self.conn, id);
         if (self.data_device) |id| wayland.dataDeviceRelease(self.conn, id);
@@ -811,6 +833,108 @@ pub const Runtime = struct {
 
     // ---- event dispatch ----
 
+    /// Forward raw IME events to a custom editor. Retained TextFields still
+    /// receive the same events; ordinary apps leave this disabled.
+    pub fn setRawImeEvents(self: *Runtime, enabled: bool) void {
+        self.raw_ime_events = enabled;
+    }
+
+    /// Declare an IME-aware field. The app owns `field` and its allocator.
+    /// Call once per frame; its state and outcome survive across frames.
+    pub fn textField(self: *Runtime, field: *text_field_mod.TextField, w: f32, h: f32) !text_field_mod.Outcome {
+        const u = self.ui() orelse return field.last;
+        const atlas = self.atlas orelse return field.last;
+        if (field.id == 0) {
+            field.id = u.next_id;
+            u.next_id += 1;
+        }
+        const n = try u.newNode();
+        n.id = field.id;
+        n.w = .{ .fixed = w };
+        n.h = .{ .fixed = h };
+        try u.current().addChild(u.allocator(), n);
+        const kb = u.beginFocusable(field.id);
+        const rect = u.prevRect(field.id) orelse .{};
+        try self.text_controller.route(std.heap.page_allocator, field, rect, u.events, self.mouse_x, self.mouse_y, self.mouse_pressed, self.mouse_down, u.kb_shift, kb.focused, atlas);
+        for (u.events) |ev| switch (ev) {
+            .key => |k| if (self.text_controller.clipboard(field, k)) |action| switch (action) {
+                .copy => if (field.buffer.hasSelection()) self.setClipboard(field.copyText()) catch {},
+                .cut => if (field.buffer.hasSelection()) {
+                    self.setClipboard(field.copyText()) catch {};
+                    field.cut();
+                },
+                .paste => self.requestClipboard(),
+            },
+            else => {},
+        };
+        _ = self.text_controller.sync(field, atlas, @floatFromInt(self.logical_h));
+        if (rect.w > 0) try field.draw(u, rect, atlas);
+        return field.last;
+    }
+
+    pub fn requestClipboard(self: *Runtime) void {
+        self.clipboard_requested = true;
+    }
+
+    fn flushIme(self: *Runtime) !void {
+        if (self.ime == null) return;
+        var batch = std.ArrayList(text_field_mod.ti.Session.Request).empty;
+        defer batch.deinit(std.heap.page_allocator);
+        // Blur requests precede the next focused field's enable request.
+        for (self.text_controller.fields.items) |field| {
+            if (field.focused) continue;
+            if (!field.needs_disable_commit or !field.session.pending) continue;
+            try field.session.flush(&batch, std.heap.page_allocator);
+            self.ime.?.sendBatch(batch.items);
+            field.needs_disable_commit = false;
+            batch.clearRetainingCapacity();
+        }
+        if (self.text_controller.focused) |field| {
+            try field.session.flush(&batch, std.heap.page_allocator);
+            self.ime.?.sendBatch(batch.items);
+        }
+        self.conn.flush();
+    }
+
+    fn enqueueIme(self: *Runtime, ev: input.ImeEvent) !void {
+        const copy: input.Event = switch (ev) {
+            .preedit => |p| .{ .ime = .{ .preedit = .{
+                .text = try self.events_arena.allocator().dupe(u8, p.text),
+                .cursor_begin = p.cursor_begin,
+                .cursor_end = p.cursor_end,
+            } } },
+            .commit => |s| .{ .ime = .{ .commit = try self.events_arena.allocator().dupe(u8, s) } },
+            .language => |s| .{ .ime = .{ .language = try self.events_arena.allocator().dupe(u8, s) } },
+            else => .{ .ime = ev },
+        };
+        try self.pending_events.append(std.heap.page_allocator, copy);
+        if (self.raw_ime_events) if (self.app_ref) |app| app.onEvent(app.ptr, self, copy);
+    }
+
+    fn dispatchIme(self: *Runtime, raw: *const wayland.ImeEvent) !void {
+        switch (raw.opcode) {
+            .enter => {
+                if (@as(u32, @bitCast(raw.a)) != self.surface) return;
+                self.ime_surface_focused = true;
+                self.text_controller.setSurfaceFocus(true);
+                try self.enqueueIme(.enter);
+            },
+            .leave => {
+                if (@as(u32, @bitCast(raw.a)) != self.surface) return;
+                self.ime_surface_focused = false;
+                self.text_controller.setSurfaceFocus(false);
+                try self.enqueueIme(.leave);
+            },
+            .preedit_string => try self.enqueueIme(.{ .preedit = .{ .text = raw.slice(), .cursor_begin = raw.a, .cursor_end = raw.b } }),
+            .commit_string => try self.enqueueIme(.{ .commit = raw.slice() }),
+            .delete_surrounding_text => try self.enqueueIme(.{ .delete_surrounding = .{ .before = @bitCast(raw.a), .after = @bitCast(raw.b) } }),
+            .done => try self.enqueueIme(.{ .done = @bitCast(raw.a) }),
+            .action => try self.enqueueIme(.{ .action = @bitCast(raw.a) }),
+            .language => try self.enqueueIme(.{ .language = raw.slice() }),
+            .preedit_hint => {}, // Styling ranges are not yet represented.
+        }
+    }
+
     fn dispatch(self: *Runtime, app: *const App, event: *wayland.Event) !void {
         // wl_display
         if (event.sender == wayland.WL_DISPLAY) {
@@ -920,15 +1044,14 @@ pub const Runtime = struct {
                     self.clearOfferMimes();
                 },
                 4 => { // drop: receive the offered uri-list/text now
-                    try self.receiveCurrentOffer();
+                    if (self.current_offer) |offer| self.receiveOffer(offer, true) catch {};
                 },
                 5 => { // selection
                     const offer = event.read32(0);
-                    if (offer != 0) {
-                        self.current_offer = offer;
-                        try self.receiveCurrentOffer();
-                    } else {
-                        self.current_offer = null;
+                    self.current_offer = if (offer != 0) offer else null;
+                    if (self.clipboard_requested) {
+                        self.clipboard_requested = false;
+                        if (self.current_offer) |current| try self.receiveOffer(current, false);
                     }
                 },
                 else => {},
@@ -1024,10 +1147,13 @@ pub const Runtime = struct {
     }
 
     fn receiveCurrentOffer(self: *Runtime) !void {
-        const offer = self.current_offer orelse return;
+        return self.receiveOffer(self.current_offer orelse return, true);
+    }
+
+    fn receiveOffer(self: *Runtime, offer: u32, is_drop: bool) !void {
         const app_ptr_dummy: ?*const App = null;
         _ = app_ptr_dummy;
-        const mime: []const u8 = if (self.offerHasMime("text/uri-list"))
+        const mime: []const u8 = if (is_drop and self.offerHasMime("text/uri-list"))
             "text/uri-list"
         else if (self.offerHasMime("text/plain"))
             "text/plain;charset=utf-8"
@@ -1126,6 +1252,7 @@ pub const Runtime = struct {
             try self.dispatch(app, event);
             if (self.quit) break;
         }
+        for (self.conn.ime_events.items) |*event| try self.dispatchIme(event);
         self.conn.clearEvents();
     }
 
@@ -1141,6 +1268,7 @@ pub const Runtime = struct {
             _ = &m2;
             _ = &m3;
             u.events = self.pending_events.items; // before begin(): begin() reads events for focus semantics
+            self.text_controller.beginFrame();
             u.begin(@floatFromInt(self.logical_w), @floatFromInt(self.logical_h), self.mouse_x, self.mouse_y, self.mouse_down, self.mouse_pressed, self.scale_f) catch |e| {
                 if (std.c.getenv("CIPHER_DEBUG_QUADS") != null) std.debug.print("cipher: ui.begin error: {s}\n", .{@errorName(e)});
                 self.ui_state = null;
@@ -1231,6 +1359,7 @@ pub const Runtime = struct {
         }
         self.pending_events.clearRetainingCapacity();
         _ = self.events_arena.reset(.free_all);
+        try self.flushIme();
 
         if (self.swapchain == null or self.gt == null) {
             // attach + damage + commit

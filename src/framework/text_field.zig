@@ -1,15 +1,6 @@
-//! Text fields: the public, IME-aware replacement for the byte-indexed
-//! `widgets.textInput`. A `TextField` owns an `EditBuffer`, its focus state,
-//! scroll offset, and the IME session that talks to the compositor.
-//!
-//! Two levels:
-//!   * `TextField` — the state object; pure, testable, no Wayland.
-//!   * `Runtime.textField()` — wires a `TextField` to the text-input-v3
-//!     object, feeds it key/IME events, draws it, and reports changes.
-//!
-//! The widget never mutates a caller's buffer in place: the app owns the
-//! `TextField`, so selection/undo/preedit state survives frames without a
-//! side table.
+//! Retained, UTF-8-aware text editing state and its immediate-mode renderer.
+//! TextField owns the buffer, selection and text-input-v3 session. Runtime
+//! supplies frame events and sends the session's ordered request batches.
 const std = @import("std");
 const grapheme = @import("../ui/text/grapheme.zig");
 const edit = @import("../ui/text/edit.zig");
@@ -20,64 +11,57 @@ const ti = @import("text_input.zig");
 
 pub const EditBuffer = edit.EditBuffer;
 pub const Motion = edit.Motion;
-pub const ChangeCause = edit.ChangeCause;
 pub const Purpose = ti.Purpose;
 pub const Hint = ti.Hint;
 
-/// Static description of a field, supplied by the app at declaration time.
 pub const Props = struct {
     purpose: Purpose = .normal,
     hint: Hint = .{},
-    /// Shown when the field is empty.
     placeholder: []const u8 = "",
-    /// Show bullets instead of text (passwords) while still editing normally.
     secret: bool = false,
-    /// Enable the system clipboard shortcuts (Ctrl+C/X/V/A/Z).
     clipboard: bool = true,
-    /// Emit `onSubmit` when the input method or Enter asks for it.
     submit_on_enter: bool = false,
 };
 
-/// What changed this frame, so the app can react without diffing strings.
 pub const Outcome = struct {
-    /// The text changed (typing, paste, delete, IME commit, undo).
     changed: bool = false,
-    /// The user asked to submit (Enter, or the IME's submit action).
     submitted: bool = false,
-    /// Focus entered the field this frame.
     focused: bool = false,
-    /// Focus left the field this frame.
     blurred: bool = false,
-    /// A commit from the input method landed this frame.
     had_ime_commit: bool = false,
 };
+
+pub const ClipboardAction = enum { copy, cut, paste };
 
 pub const TextField = struct {
     buffer: EditBuffer,
     props: Props = .{},
     session: ti.Session = .{},
-    /// Stable widget id, assigned by the runtime on first draw.
     id: u32 = 0,
+    bounds: layout.Rect = .{},
     focused: bool = false,
-    /// Horizontal scroll in logical pixels, recomputed from the caret
-    /// position so the caret is always visible in a single-line field.
     scroll_x: f32 = 0,
-    /// Last reported cursor rectangle in surface coordinates (for the IME
-    /// popup position); zeroed until the first draw.
+    scroll_y: f32 = 0,
     caret_x: f32 = 0,
     caret_y: f32 = 0,
     caret_h: f32 = 0,
-    /// True until surrounding text has been pushed after a focus gain.
     needs_surrounding: bool = true,
-    /// The most recent outcome, for callers that poll instead of using the
-    /// return value.
+    sync_cause: ti.ChangeCause = .input_method,
     last: Outcome = .{},
-    /// Blink phase, advanced by the runtime with frame time.
+    runtime_seen: u64 = 0,
+    ime_frame: u64 = 0,
     caret_phase: f32 = 0,
-    /// True while the pointer drag-selects inside the field.
     dragging: bool = false,
-    /// First visible cluster index after a horizontal scroll (debug aid).
-    measured_w: f32 = 0,
+    ime_surface: bool = false,
+    needs_disable_commit: bool = false,
+    pending: ti.Pending = .{},
+    pending_action: u32 = 0,
+    last_revision: u64 = 0,
+    last_cursor: usize = 0,
+    last_anchor: usize = 0,
+    language_buf: [128]u8 = undefined,
+    language_len: usize = 0,
+    secret_cells: [256]u8 = undefined,
 
     pub fn init(allocator: std.mem.Allocator, props: Props) TextField {
         return .{ .buffer = EditBuffer.init(allocator), .props = props };
@@ -91,187 +75,231 @@ pub const TextField = struct {
         return self.buffer.text();
     }
 
-    /// Programmatic value change. Does not fire `changed`; the app already
-    /// knows it changed the value.
     pub fn setText(self: *TextField, value: []const u8) !void {
         try self.buffer.setText(value);
         self.needs_surrounding = true;
+        self.pending.clear();
+        self.pending_action = 0;
     }
 
-    /// Focus lifecycle. The runtime calls this; apps may call it directly to
-    /// focus a field programmatically (e.g. after a search shortcut).
     pub fn focus(self: *TextField) void {
         if (self.focused) return;
         self.focused = true;
-        self.session.setFocus(true);
-        self.session.enableField(self.props.purpose, self.props.hint);
+        self.needs_disable_commit = false;
+        self.last.focused = true;
         self.needs_surrounding = true;
+        self.pending.clear();
+        self.pending_action = 0;
+        if (self.ime_surface) self.session.enableField(self.props.purpose, self.props.hint);
     }
 
     pub fn blur(self: *TextField) void {
         if (!self.focused) return;
         self.focused = false;
-        self.session.disableField();
-        self.session.setFocus(false);
+        self.last.blurred = true;
         self.dragging = false;
+        self.pending.clear();
+        self.pending_action = 0;
+        self.buffer.setPreedit("") catch {};
+        if (self.session.enabled) {
+            self.session.disableField();
+            self.needs_disable_commit = true;
+        }
     }
 
-    /// A click landed at logical x inside the field. Places the caret.
     pub fn click(self: *TextField, x_inside: f32, atlas: anytype, extend: bool) void {
+        self.clickAt(x_inside, 0, atlas, extend);
+    }
+
+    pub fn clickAt(self: *TextField, x_inside: f32, y_inside: f32, atlas: anytype, extend: bool) void {
         self.focus();
-        const cluster = atlas.clusterIndexAt(self.text(), x_inside + self.scroll_x);
-        self.buffer.setCursorCluster(cluster, extend);
+        const pos = self.hitPosition(x_inside, y_inside, atlas);
+        self.buffer.setCursorByte(pos.byte, extend);
         self.dragging = true;
+        self.needs_surrounding = true;
     }
 
     pub fn dragTo(self: *TextField, x_inside: f32, atlas: anytype) void {
+        self.dragAt(x_inside, 0, atlas);
+    }
+
+    pub fn dragAt(self: *TextField, x_inside: f32, y_inside: f32, atlas: anytype) void {
         if (!self.dragging) return;
-        const cluster = atlas.clusterIndexAt(self.text(), x_inside);
-        self.buffer.setCursorCluster(cluster, true);
+        self.buffer.setCursorByte(self.hitPosition(x_inside, y_inside, atlas).byte, true);
+        self.needs_surrounding = true;
     }
 
     pub fn endDrag(self: *TextField) void {
         self.dragging = false;
     }
 
-    /// Feed one key event. Returns true when the field consumed it.
+    const Hit = struct { byte: usize, x: f32 = 0, y: f32 = 0 };
+
+    fn hitPosition(self: *const TextField, x_inside: f32, y_inside: f32, atlas: anytype) Hit {
+        const contents = self.text();
+        if (!self.props.hint.multiline) return .{ .byte = atlas.cursorByteAt(contents, x_inside + self.scroll_x) };
+        const line_h = lineHeight(atlas);
+        var line: usize = if (line_h > 0) @intFromFloat(@max(0, @floor((y_inside + self.scroll_y) / line_h))) else 0;
+        var start: usize = 0;
+        while (line > 0 and start < contents.len) : (line -= 1) {
+            start = (std.mem.indexOfScalarPos(u8, contents, start, '\n') orelse return .{ .byte = contents.len }) + 1;
+        }
+        const end = std.mem.indexOfScalarPos(u8, contents, start, '\n') orelse contents.len;
+        return .{ .byte = start + atlas.cursorByteAt(contents[start..end], x_inside + self.scroll_x) };
+    }
+
     pub fn handleKey(self: *TextField, k: input.KeyEvent) bool {
         if (!k.pressed) return false;
         const shift = k.mods.shift();
         const ctrl = k.mods.ctrl();
-        const alt = k.mods.alt();
-        if (alt) return false; // Alt-chords belong to the app.
-        const key = k.key;
+        if (k.mods.alt()) return false;
         if (ctrl) {
-            switch (key) {
+            switch (k.key) {
                 .right => {
-                    self.buffer.move(if (shift) .word_right else .word_right, shift);
+                    self.buffer.move(.word_right, shift);
+                    self.needs_surrounding = true;
                     return true;
                 },
                 .left => {
                     self.buffer.move(.word_left, shift);
+                    self.needs_surrounding = true;
                     return true;
                 },
                 .home => {
                     self.buffer.move(.doc_start, shift);
+                    self.needs_surrounding = true;
                     return true;
                 },
                 .end => {
                     self.buffer.move(.doc_end, shift);
+                    self.needs_surrounding = true;
                     return true;
                 },
                 .delete => {
-                    _ = self.buffer.deleteWordForward(.other) catch return true;
+                    self.noteMutation(self.buffer.deleteWordForward(.other) catch false);
                     return true;
                 },
                 .backspace => {
-                    _ = self.buffer.deleteWordBackward(.other) catch return true;
+                    self.noteMutation(self.buffer.deleteWordBackward(.other) catch false);
                     return true;
                 },
-                .printable => {
-                    if (k.char) |c| {
-                        const ch: u8 = @intCast(c);
-                        if (ch == 'c') return true; // copy/cut are handled by the runtime
-                        if (ch == 'x') return true;
-                        if (ch == 'v') return true;
-                        if (ch == 'a') {
-                            self.buffer.selectAll();
-                            return true;
+                .printable => if (k.char) |c| {
+                    if (!self.props.clipboard and (c == 'c' or c == 'C' or c == 'x' or c == 'X' or c == 'v' or c == 'V')) return true;
+                    if (self.props.clipboard and (c == 'c' or c == 'C' or c == 'x' or c == 'X' or c == 'v' or c == 'V')) return true;
+                    if (c == 'a' or c == 'A') {
+                        self.buffer.selectAll();
+                        self.needs_surrounding = true;
+                        return true;
+                    }
+                    if (c == 'z' or c == 'Z') {
+                        const changed = if (shift) self.buffer.redo() else self.buffer.undo();
+                        if (changed) {
+                            self.last.changed = true;
+                            self.needs_surrounding = true;
                         }
-                        if (ch == 'z') {
-                            _ = if (shift) self.buffer.redo() else self.buffer.undo();
-                            return true;
+                        return true;
+                    }
+                    if (c == 'y') {
+                        if (self.buffer.redo()) {
+                            self.last.changed = true;
+                            self.needs_surrounding = true;
                         }
+                        return true;
                     }
                 },
                 else => {},
             }
             return false;
         }
-        switch (key) {
+        switch (k.key) {
             .backspace => {
-                _ = self.buffer.deleteBackward(.other) catch {};
+                self.noteMutation(self.buffer.deleteBackward(.other) catch false);
                 return true;
             },
             .delete => {
-                _ = self.buffer.deleteForward(.other) catch {};
+                self.noteMutation(self.buffer.deleteForward(.other) catch false);
                 return true;
             },
             .left => {
                 self.buffer.move(.left, shift);
+                self.needs_surrounding = true;
                 return true;
             },
             .right => {
                 self.buffer.move(.right, shift);
+                self.needs_surrounding = true;
                 return true;
             },
             .up => {
                 self.buffer.move(.up, shift);
+                self.needs_surrounding = true;
                 return true;
             },
             .down => {
                 self.buffer.move(.down, shift);
+                self.needs_surrounding = true;
                 return true;
             },
             .home => {
                 self.buffer.move(.line_start, shift);
+                self.needs_surrounding = true;
                 return true;
             },
             .end => {
                 self.buffer.move(.line_end, shift);
+                self.needs_surrounding = true;
                 return true;
             },
             .enter, .keypad_enter => {
-                if (self.props.hint.multiline and !self.props.submit_on_enter) {
-                    self.buffer.insert("\n", 0, .other) catch {};
-                } else {
-                    self.last.submitted = true;
-                }
+                if (self.props.hint.multiline and !self.props.submit_on_enter) self.noteInsert("\n", 0) else self.last.submitted = true;
                 return true;
             },
-            .tab => return false, // focus traversal belongs to the app
+            .tab => return false,
             .esc => return false,
             .printable, .space => {
-                if (k.char) |cp| {
-                    // Ignore control characters; a text field never inserts
-                    // them from a key event.
-                    if (cp >= 0x20 and cp != 0x7F) {
-                        var buf: [8]u8 = undefined;
-                        const n = std.unicode.utf8Encode(cp, &buf) catch return true;
-                        self.buffer.insert(buf[0..n], self.typingKey(k.code), .other) catch {};
-                        return true;
-                    }
-                }
+                if (k.char) |cp| if (cp >= 0x20 and cp != 0x7F) {
+                    var bytes: [8]u8 = undefined;
+                    const n = std.unicode.utf8Encode(cp, &bytes) catch return true;
+                    self.noteInsert(bytes[0..n], typingKey(k.code));
+                };
                 return true;
             },
             else => return false,
         }
     }
 
-    /// Coalescing key: consecutive characters from the same physical key row
-    /// form one undo run; a different key starts a new one. This is what makes
-    /// "type a word, Ctrl+Z" behave like every other editor.
-    fn typingKey(self: *TextField, code: u32) u32 {
-        _ = self;
+    fn typingKey(code: u32) u32 {
         return code | 0x1000_0000;
     }
 
-    /// Paste text (Ctrl+V or a drop). Multi-line text is flattened in a
-    /// single-line field.
+    fn noteInsert(self: *TextField, value: []const u8, key: u32) void {
+        const before = self.buffer.revision;
+        self.buffer.insert(value, key, .other) catch return;
+        self.noteMutation(self.buffer.revision != before);
+    }
+
+    fn noteMutation(self: *TextField, changed: bool) void {
+        if (!changed) return;
+        self.last.changed = true;
+        self.needs_surrounding = true;
+        self.sync_cause = .other;
+    }
+
+    /// Runtime handles clipboard I/O; these methods remain useful to custom
+    /// hosts that provide their own selection backend.
     pub fn paste(self: *TextField, data: []const u8) void {
-        const self_ptr = self;
-        var scratch: [4096]u8 = undefined;
+        var clean = std.ArrayList(u8).empty;
+        defer clean.deinit(self.buffer.allocator);
         var slice = data;
         if (!self.props.hint.multiline) {
-            const n = @min(data.len, scratch.len);
-            @memcpy(scratch[0..n], data[0..n]);
-            for (scratch[0..n]) |*c| {
-                if (c.* == '\n' or c.* == '\r' or c.* == '\t') c.* = ' ';
-            }
-            slice = scratch[0..n];
+            clean.appendSlice(self.buffer.allocator, data) catch return;
+            for (clean.items) |*c| if (c.* == '\n' or c.* == '\r' or c.* == '\t') {
+                c.* = ' ';
+            };
+            slice = clean.items;
         }
-        self_ptr.buffer.insert(slice, 0, .other) catch {};
-        self_ptr.buffer.endEditRun();
+        self.noteInsert(slice, 0);
+        self.buffer.endEditRun();
     }
 
     pub fn copyText(self: *const TextField) []const u8 {
@@ -279,231 +307,338 @@ pub const TextField = struct {
     }
 
     pub fn cut(self: *TextField) void {
-        if (self.buffer.hasSelection()) _ = self.buffer.deleteBackward(.other) catch {};
+        self.noteMutation(self.buffer.deleteBackward(.other) catch false);
     }
 
-    /// Feed one IME event from the text-input-v3 object.
+    pub fn clipboardAction(self: *const TextField, k: input.KeyEvent) ?ClipboardAction {
+        if (!self.props.clipboard or !k.pressed or !k.mods.ctrl() or k.mods.alt() or k.key != .printable) return null;
+        const c = k.char orelse return null;
+        return switch (c) {
+            'c', 'C' => .copy,
+            'x', 'X' => .cut,
+            'v', 'V' => .paste,
+            else => null,
+        };
+    }
+
+    /// Synchronize compositor surface focus independently of logical field
+    /// focus. Events before the first frame are retained by Runtime.
+    pub fn setSurfaceFocus(self: *TextField, focused: bool) void {
+        self.handleIme(if (focused) .enter else .leave);
+    }
+
+    /// Queue one event. No commit/delete/preedit is applied until `done`.
     pub fn handleIme(self: *TextField, ev: input.ImeEvent) void {
         switch (ev) {
-            .enter => self.session.setFocus(true),
+            .enter => {
+                self.ime_surface = true;
+                self.session.setFocus(true);
+                self.session.have_surrounding = false;
+                self.needs_surrounding = true;
+                self.pending.clear();
+                self.pending_action = 0;
+                if (self.focused) self.session.enableField(self.props.purpose, self.props.hint);
+            },
             .leave => {
-                self.session.setFocus(false);
+                self.ime_surface = false;
+                self.session.invalidateAfterLeave();
+                self.pending.clear();
+                self.pending_action = 0;
                 self.buffer.setPreedit("") catch {};
                 self.needs_surrounding = true;
+                self.needs_disable_commit = false;
             },
             .preedit => |p| {
-                self.buffer.setPreedit(p.text) catch {};
-                self.needs_surrounding = false;
+                if (p.cursor_begin < -1 or p.cursor_end < -1 or p.cursor_begin > p.cursor_end) return;
+                if (p.cursor_begin >= 0 and (p.cursor_end > p.text.len or
+                    !grapheme.isCodepointBoundary(p.text, @intCast(p.cursor_begin)) or
+                    !grapheme.isCodepointBoundary(p.text, @intCast(p.cursor_end)))) return;
+                self.pending.preedit = p.text;
+                self.pending.preedit_cursor_begin = p.cursor_begin;
+                self.pending.preedit_cursor_end = p.cursor_end;
             },
-            .commit => |text| {
-                // Protocol order: delete surrounding text first, then insert
-                // the commit string at the cursor.
-                self.buffer.commitIme(text, 0, 0) catch {};
-                self.last.changed = true;
-                self.last.had_ime_commit = true;
-                self.needs_surrounding = true;
-            },
+            .commit => |value| self.pending.commit = value,
             .delete_surrounding => |d| {
-                // The commit that follows carries the replacement; the deletes
-                // are applied together with it by the compositor's ordering,
-                // so stash them for the next commit.
-                self.pending_before = d.before;
-                self.pending_after = d.after;
+                self.pending.delete_before = d.before;
+                self.pending.delete_after = d.after;
             },
-            .done => {},
-            .action => |a| {
-                if (a == 1) self.last.submitted = true;
-            },
+            .done => |serial| self.applyDone(serial),
+            .action => |a| self.pending_action = a,
             .language => |lang| {
-                self.buffer.language = lang;
+                const n = @min(lang.len, self.language_buf.len);
+                @memcpy(self.language_buf[0..n], lang[0..n]);
+                self.language_len = n;
+                self.buffer.language = self.language_buf[0..n];
+                self.session.language = self.buffer.language;
             },
         }
-    },
-
-    // Deletes that arrive before their commit string.
-    pending_before: u32 = 0,
-    pending_after: u32 = 0,
-
-    /// Reconcile the buffer's IME-visible state with what the compositor sent
-    /// last frame. Called by the runtime before drawing: if a delete was
-    /// staged and no commit arrived, apply it now (the compositor may send a
-    /// delete without a replacement).
-    pub fn flushStagedDeletes(self: *TextField) void {
-        if (self.pending_before == 0 and self.pending_after == 0) return;
-        self.buffer.commitIme("", self.pending_before, self.pending_after) catch {};
-        self.pending_before = 0;
-        self.pending_after = 0;
-        self.last.changed = true;
-        self.needs_surrounding = true;
     }
 
-    /// Push surrounding text + cursor rectangle to the IME when needed.
-    /// `bounds` is the field rect in logical surface coordinates.
-    /// Returns true when requests were queued (the caller must flush).
+    fn applyDone(self: *TextField, serial: u32) void {
+        if (!self.focused) {
+            self.pending.clear();
+            self.pending_action = 0;
+            self.session.noteDone(serial);
+            return;
+        }
+        const revision = self.buffer.revision;
+        const had_commit = self.pending.commit.len > 0;
+        self.buffer.applyIme(
+            self.pending.commit,
+            self.pending.delete_before,
+            self.pending.delete_after,
+            self.pending.preedit,
+            self.pending.preedit_cursor_begin,
+            self.pending.preedit_cursor_end,
+        ) catch return;
+        self.pending.clear();
+        if (self.buffer.revision != revision) {
+            self.last.changed = true;
+            self.last.had_ime_commit = self.last.had_ime_commit or had_commit;
+            self.needs_surrounding = true;
+        } else {
+            self.needs_surrounding = true;
+        }
+        self.sync_cause = if (self.buffer.revision != revision) .input_method else .other;
+        if (self.pending_action == 1) self.last.submitted = true;
+        self.pending_action = 0;
+        self.session.noteDone(serial);
+    }
+
     pub fn syncIme(self: *TextField, atlas: anytype, bounds: layout.Rect, window_h: f32) bool {
-        if (!self.focused) return false;
+        _ = window_h;
+        if (!self.focused) return self.needs_disable_commit and self.session.pending;
+        if (!self.ime_surface) return false;
+        if (self.buffer.revision != self.last_revision or self.buffer.cursor != self.last_cursor or self.buffer.anchor != self.last_anchor) {
+            self.needs_surrounding = true;
+            self.session.setChangeCause(switch (self.buffer.last_cause) {
+                .input_method => .input_method,
+                .other => .other,
+            });
+        }
+        self.last_revision = self.buffer.revision;
+        self.last_cursor = self.buffer.cursor;
+        self.last_anchor = self.buffer.anchor;
         if (self.needs_surrounding) {
-            const text = self.text();
-            // Protocol window: keep the cursor visible in a bounded slice.
-            const cursor = @min(self.buffer.cursorByte(), text.len);
-            const max_ctx: usize = 512;
-            var start: usize = 0;
-            if (cursor > max_ctx) start = grapheme.floorBoundary(text, cursor - max_ctx);
-            const end = @min(text.len, cursor + max_ctx);
-            self.session.setSurrounding(text[start..end], cursor - start, cursor - start);
+            self.session.setChangeCause(self.sync_cause);
+            const w = ti.Session.surroundingWindow(self.text(), self.buffer.cursor, self.buffer.anchor, 4000);
+            self.session.setSurrounding(self.text()[w.start..w.end], w.cursor, w.anchor);
             self.needs_surrounding = false;
         }
-        // Caret rectangle: the IME popup is positioned next to it.
-        const cluster = self.buffer.cursorCluster();
-        const before = self.buffer.offsetOfCluster(cluster);
-        const width = atlas.measureWidth(self.text()[0..before]);
-        const real_w = atlas.measureWidth(self.text()[0..before]) * 1.0;
-        _ = width;
-        const caret_h: f32 = if (bounds.h > 0) bounds.h - 8 else 18;
-        const x = bounds.x + 8 + real_w - self.scroll_x;
-        const y = bounds.y + 4;
-        self.caret_x = x;
-        self.caret_y = y;
-        self.caret_h = caret_h;
-        _ = window_h;
-        self.session.setCursorRect(x, y, 2, caret_h);
-        return true;
+        const caret = self.caretGeometry(atlas, bounds);
+        self.caret_x = caret.x;
+        self.caret_y = caret.y;
+        self.caret_h = caret.h;
+        self.session.setCursorRect(caret.x, caret.y, 2, caret.h);
+        return self.session.pending;
     }
 
-    /// Draw the field. Call with the rect from the previous frame (immediate
-    /// mode convention) and the frame's scale.
-    pub fn draw(self: *TextField, ui: *ui_mod.Ui, rect: layout.Rect, atlas: anytype) !void {
-        _ = atlas;
-        const focused = self.focused;
-        const bg = if (focused) ui_mod.COLOR_BUTTON_HOT else ui_mod.COLOR_BUTTON;
-        try ui.addRect(rect, bg);
-        if (focused) {
-            // Focus ring: 1px accent border, matching the button focus style.
-            const c = ui_mod.COLOR_FOCUS_RING;
-            try ui.addRect(.{ .x = rect.x, .y = rect.y + rect.h - 1, .w = rect.w, .h = 1 }, c);
+    const Caret = struct { x: f32, y: f32, h: f32 };
+
+    fn caretGeometry(self: *TextField, atlas: anytype, bounds: layout.Rect) Caret {
+        const pad: f32 = 8;
+        const lh = lineHeight(atlas);
+        var line_start: usize = 0;
+        var line: usize = 0;
+        const cursor = self.buffer.cursor;
+        while (std.mem.indexOfScalarPos(u8, self.text(), line_start, '\n')) |nl| {
+            if (nl >= cursor) break;
+            line_start = nl + 1;
+            line += 1;
         }
-        const pad_x: f32 = 8;
-        const text = self.text();
+        const logical_h = if (self.props.hint.multiline) lh else @max(lh, bounds.h - 8);
+        const target_y = @as(f32, @floatFromInt(line)) * lh;
+        if (self.props.hint.multiline) {
+            if (target_y < self.scroll_y) self.scroll_y = target_y;
+            if (target_y + lh > self.scroll_y + bounds.h - 2 * pad) self.scroll_y = @max(0, target_y + lh - bounds.h + 2 * pad);
+        }
+        const before_w = if (self.props.secret)
+            @as(f32, @floatFromInt(grapheme.count(self.text()[line_start..cursor]))) * atlas.measureWidth("*")
+        else
+            atlas.measureWidth(self.text()[line_start..cursor]);
+        const available = @max(0, bounds.w - 2 * pad);
+        if (before_w < self.scroll_x) self.scroll_x = before_w;
+        if (before_w > self.scroll_x + available - 2) self.scroll_x = @max(0, before_w - available + 2);
+        if (atlas.measureWidth(if (self.props.secret) "" else self.text()[line_start..(std.mem.indexOfScalarPos(u8, self.text(), line_start, '\n') orelse self.text().len)]) <= available) self.scroll_x = 0;
+        return .{
+            .x = bounds.x + pad + before_w - self.scroll_x,
+            .y = bounds.y + pad + target_y - self.scroll_y + (if (self.props.hint.multiline) @as(f32, 0) else @max(0, (bounds.h - 2 * pad - lh) / 2)),
+            .h = logical_h,
+        };
+    }
+
+    fn lineHeight(atlas: anytype) f32 {
+        return @as(f32, @floatFromInt(atlas.font.ascender - atlas.font.descender + atlas.font.line_gap)) * atlas.scale;
+    }
+
+    pub fn draw(self: *TextField, ui: *ui_mod.Ui, rect: layout.Rect, atlas: anytype) !void {
+        try ui.addRect(rect, if (self.focused) ui_mod.COLOR_BUTTON_HOT else ui_mod.COLOR_BUTTON);
+        if (self.focused) try ui.addRect(.{ .x = rect.x, .y = rect.y + rect.h - 1, .w = rect.w, .h = 1 }, ui_mod.COLOR_FOCUS_RING);
+        const pad: f32 = 8;
+        const lh = lineHeight(atlas);
+        const baseline = @as(f32, @floatFromInt(atlas.font.ascender)) * atlas.scale;
+        const contents = self.text();
         const preedit = self.buffer.preedit();
-        const show = if (self.props.secret) secretSlice(text, self.secretBuf()) else text;
-        if (show.len == 0 and preedit.len == 0 and self.props.placeholder.len > 0) {
-            try ui.addText(rect.x + pad_x - self.scroll_x, rect.y + rect.h - 7, self.props.placeholder, ui_mod.COLOR_TEXT_DIM);
-        } else if (self.props.secret) {
-            try ui.addText(rect.x + pad_x, rect.y + rect.h - 7, show, ui_mod.COLOR_TEXT);
+        if (self.props.secret) {
+            const n = @min(self.buffer.clusterCount(), self.secret_cells.len);
+            for (self.secret_cells[0..n]) |*c| c.* = '*';
+            try ui.addText(rect.x + pad - self.scroll_x, rect.y + rect.h - 7, self.secret_cells[0..n], ui_mod.COLOR_TEXT);
+        } else if (self.props.hint.multiline) {
+            try self.drawMultiline(ui, rect, atlas, lh, baseline);
         } else {
-            try ui.addText(rect.x + pad_x - self.scroll_x, rect.y + rect.h - 7, text, ui_mod.COLOR_TEXT);
-            if (preedit.len > 0) {
-                const tw = ui.atlas.measure(text) / ui.scale;
-                try ui.addText(rect.x + pad_x + tw - self.scroll_x, rect.y + rect.h - 7, preedit, ui_mod.COLOR_TEXT);
-                // Underline the composition so the user sees what is pending.
-                const pw = ui.atlas.measure(preedit) / ui.scale;
-                try ui.addRect(.{
-                    .x = rect.x + pad_x + tw - self.scroll_x,
-                    .y = rect.y + rect.h - 2,
-                    .w = pw,
-                    .h = 1,
-                }, ui_mod.COLOR_FOCUS_RING);
+            const caret = self.buffer.cursor;
+            const top = rect.y + pad + (rect.h - 2 * pad - lh) / 2;
+            try self.drawSelection(ui, rect, atlas, pad, top, lh, 0, contents.len);
+            const y = rect.y + rect.h - 7;
+            if (contents.len == 0 and preedit.len == 0) {
+                try ui.addText(rect.x + pad, y, self.props.placeholder, ui_mod.COLOR_TEXT_DIM);
+            } else {
+                try ui.addText(rect.x + pad - self.scroll_x, y, contents[0..caret], ui_mod.COLOR_TEXT);
+                const cx = rect.x + pad + atlas.measureWidth(contents[0..caret]) - self.scroll_x;
+                try ui.addText(cx, y, preedit, ui_mod.COLOR_TEXT);
+                const pw = atlas.measureWidth(preedit);
+                if (pw > 0) try ui.addRect(.{ .x = cx, .y = y + 3, .w = pw, .h = 1 }, ui_mod.COLOR_FOCUS_RING);
+                try ui.addText(cx + pw, y, contents[caret..], ui_mod.COLOR_TEXT);
             }
         }
-        if (focused) {
-            const caret_x = self.caret_x - rect.x + rect.x; // caret_x is absolute
-            _ = caret_x;
+        if (self.focused and @mod(self.caret_phase, 1.0) < 0.6) {
+            try ui.addRect(.{ .x = self.caret_x, .y = self.caret_y, .w = 2, .h = self.caret_h }, ui_mod.COLOR_TEXT);
         }
     }
 
-    // Scratch for secret rendering (bullets), one per field, no allocation.
-    secret_cells: [256]u8 = undefined,
+    fn drawSelection(self: *TextField, ui: *ui_mod.Ui, rect: layout.Rect, atlas: anytype, pad: f32, top: f32, lh: f32, line_start: usize, line_end: usize) !void {
+        const start = @max(line_start, self.buffer.selectionStart());
+        const end = @min(line_end, self.buffer.selectionEnd());
+        if (start >= end) return;
+        const contents = self.text();
+        try ui.addRect(.{
+            .x = rect.x + pad + atlas.measureWidth(contents[line_start..start]) - self.scroll_x,
+            .y = top,
+            .w = atlas.measureWidth(contents[start..end]),
+            .h = lh,
+        }, ui_mod.COLOR_BUTTON_ACTIVE);
+    }
 
-    fn secretBuf(self: *TextField) []const u8 {
-        const n = @min(self.buffer.clusterCount(), self.secret_cells.len);
-        var i: usize = 0;
-        while (i < n) : (i += 1) self.secret_cells[i] = '*';
-        return self.secret_cells[0..n];
+    fn drawMultiline(self: *TextField, ui: *ui_mod.Ui, rect: layout.Rect, atlas: anytype, lh: f32, baseline: f32) !void {
+        const pad: f32 = 8;
+        const contents = self.text();
+        const preedit = self.buffer.preedit();
+        var start: usize = 0;
+        var row: usize = 0;
+        while (start <= contents.len) {
+            const nl = std.mem.indexOfScalarPos(u8, contents, start, '\n');
+            const end = nl orelse contents.len;
+            const top = rect.y + pad + @as(f32, @floatFromInt(row)) * lh - self.scroll_y;
+            if (top + lh >= rect.y and top < rect.y + rect.h) {
+                const sel_start = @max(start, self.buffer.selectionStart());
+                const sel_end = @min(end, self.buffer.selectionEnd());
+                if (sel_start < sel_end) {
+                    const x = rect.x + pad + atlas.measureWidth(contents[start..sel_start]) - self.scroll_x;
+                    try ui.addRect(.{ .x = x, .y = top, .w = atlas.measureWidth(contents[sel_start..sel_end]), .h = lh }, ui_mod.COLOR_BUTTON_ACTIVE);
+                }
+                const y = top + baseline;
+                if (self.buffer.cursor >= start and self.buffer.cursor <= end) {
+                    const c = self.buffer.cursor;
+                    try ui.addText(rect.x + pad - self.scroll_x, y, contents[start..c], ui_mod.COLOR_TEXT);
+                    const cx = rect.x + pad + atlas.measureWidth(contents[start..c]) - self.scroll_x;
+                    try ui.addText(cx, y, preedit, ui_mod.COLOR_TEXT);
+                    const pw = atlas.measureWidth(preedit);
+                    if (pw > 0) try ui.addRect(.{ .x = cx, .y = y + 3, .w = pw, .h = 1 }, ui_mod.COLOR_FOCUS_RING);
+                    try ui.addText(cx + pw, y, contents[c..end], ui_mod.COLOR_TEXT);
+                } else {
+                    try ui.addText(rect.x + pad - self.scroll_x, y, contents[start..end], ui_mod.COLOR_TEXT);
+                }
+            }
+            if (nl == null) break;
+            start = end + 1;
+            row += 1;
+        }
+        if (contents.len == 0 and preedit.len == 0) try ui.addText(rect.x + pad, rect.y + pad + baseline, self.props.placeholder, ui_mod.COLOR_TEXT_DIM);
     }
 };
 
-fn secretSlice(text: []const u8, cells: []const u8) []const u8 {
-    _ = text;
-    return cells;
+fn makeKey(code: u32, k: input.Key, char: ?u21, mods: u32) input.KeyEvent {
+    return .{ .code = code, .key = k, .char = char, .mods = .{ .raw = mods }, .pressed = true };
 }
 
-test "field: focus enables IME, blur disables it" {
+test "field: focus waits for surface enter; blur queues disable" {
     var f = TextField.init(std.testing.allocator, .{});
     defer f.deinit();
-    try std.testing.expect(!f.focused);
     f.focus();
-    try std.testing.expect(f.focused);
-    try std.testing.expect(f.session.enabled);
-    try std.testing.expect(f.session.pending);
-    var batch = std.ArrayList(ti.Session.Request).empty;
-    defer batch.deinit(std.testing.allocator);
-    try f.session.flush(&batch, std.testing.allocator);
-    try std.testing.expect(batch.items[0] == .enable);
-    f.blur();
     try std.testing.expect(!f.session.enabled);
-    std.debug.print("FIELD_FOCUS_IME_OK\n", .{});
+    f.handleIme(.enter);
+    try std.testing.expect(f.session.enabled);
+    f.blur();
+    try std.testing.expect(f.session.pending);
+    try std.testing.expect(!f.focused);
 }
 
-test "field: typing produces grapheme-safe edits and one undo run" {
+test "field: typing is grapheme-safe and undoable" {
     var f = TextField.init(std.testing.allocator, .{});
     defer f.deinit();
     f.focus();
-    const keys = [_]input.KeyEvent{
-        .{ .code = 30, .key = .printable, .char = 'h', .mods = .{}, .pressed = true },
-        .{ .code = 23, .key = .printable, .char = 'i', .mods = .{}, .pressed = true },
-    };
-    for (keys) |k| try std.testing.expect(f.handleKey(k));
+    try std.testing.expect(f.handleKey(makeKey(30, .printable, 'h', 0)));
+    try std.testing.expect(f.handleKey(makeKey(30, .printable, 'i', 0)));
     try std.testing.expectEqualStrings("hi", f.text());
-    // Ctrl+Z undoes the whole typed run.
-    try std.testing.expect(f.handleKey(.{ .code = 44, .key = .printable, .char = 'z', .mods = .{ .raw = 0x4 }, .pressed = true }));
+    try std.testing.expect(f.handleKey(makeKey(44, .printable, 'z', 4)));
     try std.testing.expectEqualStrings("", f.text());
-    std.debug.print("FIELD_TYPE_OK\n", .{});
 }
 
-test "field: select-all and cut" {
-    var f = TextField.init(std.testing.allocator, .{});
-    defer f.deinit();
-    try f.setText("hello");
-    f.focus();
-    f.buffer.selectAll();
-    try std.testing.expectEqualStrings("hello", f.copyText());
-    f.cut();
-    try std.testing.expectEqualStrings("", f.text());
-    std.debug.print("FIELD_CUT_OK\n", .{});
-}
-
-test "field: IME commit inserts at cursor; preedit never touches text" {
+test "field: done applies commit and preedit atomically" {
     var f = TextField.init(std.testing.allocator, .{});
     defer f.deinit();
     try f.setText("ab");
     f.focus();
+    f.handleIme(.enter);
     f.handleIme(.{ .preedit = .{ .text = "にほ", .cursor_begin = 0, .cursor_end = 6 } });
-    try std.testing.expectEqualStrings("ab", f.text());
-    try std.testing.expectEqualStrings("にほ", f.buffer.preedit());
     f.handleIme(.{ .commit = "日本" });
-    try std.testing.expectEqualStrings("ab日本", f.text());
+    try std.testing.expectEqualStrings("ab", f.text());
     try std.testing.expectEqual(@as(usize, 0), f.buffer.preedit().len);
+    f.handleIme(.{ .done = 0 });
+    try std.testing.expectEqualStrings("ab日本", f.text());
+    try std.testing.expectEqualStrings("にほ", f.buffer.preedit());
+    try std.testing.expect(f.last.changed);
     try std.testing.expect(f.last.had_ime_commit);
-    std.debug.print("FIELD_IME_OK\n", .{});
 }
 
-test "field: staged delete without a commit is applied on flush" {
+test "field: delete and replacement share one done transaction" {
     var f = TextField.init(std.testing.allocator, .{});
     defer f.deinit();
-    try f.setText("abc");
+    try f.setText("abcd");
     f.focus();
-    f.handleIme(.{ .delete_surrounding = .{ .before = 1, .after = 0 } });
-    f.flushStagedDeletes();
-    try std.testing.expectEqualStrings("ab", f.text());
-    std.debug.print("FIELD_STAGED_DELETE_OK\n", .{});
+    f.handleIme(.enter);
+    f.handleIme(.{ .delete_surrounding = .{ .before = 1, .after = 1 } });
+    f.handleIme(.{ .commit = "X" });
+    try std.testing.expectEqualStrings("abcd", f.text());
+    f.handleIme(.{ .done = 0 });
+    try std.testing.expectEqualStrings("abcX", f.text());
+    f.handleIme(.{ .preedit = .{ .text = "", .cursor_begin = -1, .cursor_end = -1 } });
+    f.handleIme(.{ .done = 0 });
 }
 
-test "field: password field masks without losing the value" {
-    var f = TextField.init(std.testing.allocator, .{ .secret = true });
+test "field: stale done still edits and leave clears preedit" {
+    var f = TextField.init(std.testing.allocator, .{});
     defer f.deinit();
-    try f.setText("secret");
-    try std.testing.expectEqualStrings("secret", f.text());
     f.focus();
-    try std.testing.expectEqualStrings("secret", f.copyText() ++ "secret"[0..0]);
-    std.debug.print("FIELD_SECRET_OK\n", .{});
+    f.handleIme(.enter);
+    f.handleIme(.{ .commit = "A" });
+    f.handleIme(.{ .done = 99 });
+    try std.testing.expectEqualStrings("A", f.text());
+    try std.testing.expect(f.session.pending);
+    f.handleIme(.{ .preedit = .{ .text = "x", .cursor_begin = 1, .cursor_end = 1 } });
+    f.handleIme(.{ .done = 99 });
+    try std.testing.expectEqualStrings("x", f.buffer.preedit());
+    f.handleIme(.leave);
+    try std.testing.expectEqual(@as(usize, 0), f.buffer.preedit().len);
+    try std.testing.expect(!f.session.has_focus);
+}
+
+test "field: clipboard shortcuts are semantic even with capital characters" {
+    var f = TextField.init(std.testing.allocator, .{});
+    defer f.deinit();
+    try std.testing.expectEqual(ClipboardAction.copy, f.clipboardAction(makeKey(46, .printable, 'C', 5)).?);
+    try std.testing.expectEqual(ClipboardAction.cut, f.clipboardAction(makeKey(45, .printable, 'X', 5)).?);
+    try std.testing.expectEqual(ClipboardAction.paste, f.clipboardAction(makeKey(47, .printable, 'V', 5)).?);
+    f.paste("a\nb\tc");
+    try std.testing.expectEqualStrings("a b c", f.text());
 }
