@@ -48,6 +48,19 @@ pub fn build(b: *std.Build) void {
     });
     audio_mod.link_libc = true;
 
+    // audio-sink example — opt-in. Built and run only via `zig build run-audio-sink`
+    // so the default build does not compile or link the audio output module.
+    const audio_sink_mod = b.createModule(.{
+        .root_source_file = b.path("examples/audio_sink/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    audio_sink_mod.link_libc = true;
+    audio_sink_mod.addImport("audio", audio_mod);
+    const audio_sink = b.addExecutable(.{ .name = "cipher-audio-sink", .root_module = audio_sink_mod });
+    const run_audio_sink = b.addRunArtifact(audio_sink);
+    b.step("run-audio-sink", "Play a short tone through the audio sink (Pulse/ALSA; no-op without a server)").dependOn(&run_audio_sink.step);
+
     const hello_mod = b.createModule(.{
         .root_source_file = b.path("apps/hello.zig"),
         .target = target,
@@ -138,6 +151,7 @@ pub fn build(b: *std.Build) void {
         .{ "src/framework_ime_shim.zig", "framework_ime_shim" },
         .{ "src/term_shim.zig", "term_shim" },
         .{ "src/audio_shim.zig", "audio_shim" },
+        .{ "src/audio/sink_test.zig", "audio_sink" },
         .{ "src/gpu/vulkan/text.zig", "vulkan_text" },
         .{ "src/gpu_text_test.zig", "gpu_text_test" },
     };
