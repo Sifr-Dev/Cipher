@@ -12,7 +12,7 @@ const usage =
     \\  src/main.zig (a running window — Esc quits), README, .gitignore.
     \\
     \\  PATH is the framework checkout (default: $CIPHER_HOME, else
-    \\  ../sifr-native relative to where you create the app). A relative
+    \\  ../Cipher relative to where you create the app). A relative
     \\  path is used verbatim; an absolute one is relativized to the app.
     \\
 ;
@@ -70,7 +70,7 @@ pub fn run(alloc: std.mem.Allocator, argv: []const []const u8) !u8 {
     const app_dir = try std.fs.path.join(alloc, &.{ cwd, n });
     defer alloc.free(app_dir);
 
-    const chosen = cipher_arg orelse util.env("CIPHER_HOME") orelse "../sifr-native";
+    const chosen = cipher_arg orelse util.env("CIPHER_HOME") orelse "../Cipher";
     const abs = if (std.fs.path.isAbsolute(chosen))
         try alloc.dupe(u8, chosen)
     else blk: {

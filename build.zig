@@ -78,9 +78,9 @@ pub fn build(b: *std.Build) void {
     const run_hello_step = b.step("run-hello", "Run the cipher hello app (Esc quits)");
     run_hello_step.dependOn(&run_hello.step);
 
-    // NOTE: the showcase apps (rex, cipherterm, nocturne) live in the
-    // separate sifr-apps project, which consumes this framework by path —
-    // this repo is the framework itself plus the hello example.
+    // NOTE: the apps built on this framework (janus, nebula, nocturne, …)
+    // each live in their own repository and consume Cipher as a pinned
+    // dependency — this repo is the framework itself plus the hello example.
 
     // cipher-bench — hillclimb-style benchmark scenes (examples/bench).
     const bench_mod = b.createModule(.{
