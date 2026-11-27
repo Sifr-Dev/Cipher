@@ -77,6 +77,28 @@ pub const MouseButton = struct {
     pressed: bool,
 };
 
+/// Input-method (IME) event, from the compositor's text-input-v3 object.
+/// The runtime applies these to the focused text field; apps only see them
+/// when they opt into raw handling (e.g. a custom editor).
+pub const ImeEvent = union(enum) {
+    /// The compositor's text-input focus entered/left our surface.
+    enter: void,
+    leave: void,
+    /// Composition text to display (never inserted). `cursor_begin` and
+    /// `cursor_end` are byte offsets into it, or -1 when the cursor is hidden.
+    preedit: struct { text: []const u8, cursor_begin: i32, cursor_end: i32 },
+    /// Text the input method wants inserted at the cursor.
+    commit: []const u8,
+    /// Delete `before` bytes before and `after` bytes after the cursor.
+    delete_surrounding: struct { before: u32, after: u32 },
+    /// The compositor applied everything up to this commit serial.
+    done: u32,
+    /// The user triggered an action (submit) on the field.
+    action: u32,
+    /// BCP 47 language chosen by the input method.
+    language: []const u8,
+};
+
 /// Framework-level event delivered to App.onEvent.
 pub const Event = union(enum) {
     key: KeyEvent,
@@ -87,6 +109,9 @@ pub const Event = union(enum) {
     paste: []const u8, // clipboard text or dropped file paths
     focus: bool,
     close, // compositor asked to close the window
+    /// Raw IME traffic, for apps that render their own editor. The default
+    /// text field consumes these before the app sees them.
+    ime: ImeEvent,
 };
 
 pub const KeyMapResult = struct { key: Key, char: ?u21 };
