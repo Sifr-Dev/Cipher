@@ -7,7 +7,7 @@ const edit = @import("../ui/text/edit.zig");
 const input = @import("input.zig");
 const ui_mod = @import("../ui/ui.zig");
 const layout = @import("../ui/layout.zig");
-const ti = @import("text_input.zig");
+pub const ti = @import("text_input.zig");
 
 pub const EditBuffer = edit.EditBuffer;
 pub const Motion = edit.Motion;
@@ -38,7 +38,7 @@ pub const TextField = struct {
     props: Props = .{},
     session: ti.Session = .{},
     id: u32 = 0,
-    bounds: layout.Rect = .{},
+    bounds: layout.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     focused: bool = false,
     scroll_x: f32 = 0,
     scroll_y: f32 = 0,
