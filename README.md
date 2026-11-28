@@ -62,10 +62,10 @@ Start from the full walkthrough — [**docs/GETTING_STARTED.md**](docs/GETTING_S
 The short version:
 
 ```sh
-git clone https://github.com/Sifr-Dev/Cipher.git sifr-native
-cd sifr-native && zig build && cd ..
-./sifr-native/zig-out/bin/cipher doctor           # zig + Wayland + Vulkan + fonts
-CIPHER_HOME=$PWD/sifr-native ./sifr-native/zig-out/bin/cipher new my-app
+git clone https://github.com/Sifr-Dev/Cipher.git Cipher
+cd Cipher && zig build && cd ..
+./Cipher/zig-out/bin/cipher doctor                # zig + Wayland + Vulkan + fonts
+CIPHER_HOME=$PWD/Cipher ./Cipher/zig-out/bin/cipher new my-app
 cd my-app && zig build run                        # a window; Esc quits
 ```
 
@@ -73,8 +73,21 @@ The scaffold gives you `src/main.zig` (a panel, a label, a button), a correct
 `build.zig.zon` path dependency on this checkout, and a README. Your binary
 needs nothing at runtime but the system Wayland loader and a Vulkan ICD
 (software fallback included). `apps/hello.zig` is the richer canonical
-example (`zig build run-hello`, Esc quits); the apps in sifr-apps are the
-full-scale ones.
+example (`zig build run-hello`, Esc quits); the apps below are the full-scale
+ones, each in its own repository.
+
+## Apps built on Cipher
+
+<!-- BEGIN GENERATED APP INDEX -->
+| App | Purpose | Status | Repository | Cipher |
+| --- | --- | --- | --- | --- |
+| [janus](https://github.com/Sifr-Dev/janus) | GPU-native terminal with panes, tabs and themes | active | https://github.com/Sifr-Dev/janus | pinned via -Dcipher-root |
+| [nebula](https://github.com/Sifr-Dev/nebula) | Multiplexer engine: spawn/split/capture sessions over a unix socket | active | https://github.com/Sifr-Dev/nebula | pinned via -Dcipher-root |
+| [nocturne](https://github.com/Sifr-Dev/nocturne) | Offline music player with bit-exact FLAC decode, LRC lyrics and crossfade | active | https://github.com/Sifr-Dev/nocturne | pinned via -Dcipher-root |
+<!-- END GENERATED APP INDEX -->
+
+This index is generated from `apps/manifest.json` by `tools/gen_app_index.py`;
+do not edit the table by hand.
 
 ## verified evidence (2026-11-17, RTX 4060 Laptop + lavapipe)
 
@@ -118,13 +131,13 @@ built-from-zero apps prove the framework end to end:
 | nocturne | offline FLAC music player (from-zero decoder, synced LRC/VORBIS lyrics, crossfade) | live umbriel/NVIDIA: exit 0, frames=41 |
 | cipher-hello | framework smoke app (every widget) | `WAYLAND_PROTOCOL_OK frames=24/120`, exit 0 |
 
-Both apps live in the separate **sifr-apps** project, which consumes this
-framework as a path dependency — exactly how an app is built on Qt. The
-framework ships no binaries; apps ship themselves.
+These apps each live in their own repository and consume this framework as a
+pinned dependency — exactly how an app is built on Qt. The framework ships no
+binaries; apps ship themselves.
 
 ## speed & footprint vs toolkits (2026-11-17)
 
-minimal hello window, 120 frames, umbriel/NVIDIA — full data in `sifr-apps/bench/BENCH.md`:
+minimal hello window, 120 frames, umbriel/NVIDIA — full data in the janus repository's `bench/BENCH.md`:
 
 | | cipher (ReleaseSafe stripped) | gtk4 | qt6 |
 | --- | --- | --- | --- |

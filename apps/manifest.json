@@ -1,0 +1,26 @@
+{
+  "framework": "Cipher",
+  "apps": [
+    {
+      "name": "janus",
+      "purpose": "GPU-native terminal with panes, tabs and themes",
+      "status": "active",
+      "repo": "https://github.com/Sifr-Dev/janus",
+      "cipher_version": "pinned via -Dcipher-root"
+    },
+    {
+      "name": "nebula",
+      "purpose": "Multiplexer engine: spawn/split/capture sessions over a unix socket",
+      "status": "active",
+      "repo": "https://github.com/Sifr-Dev/nebula",
+      "cipher_version": "pinned via -Dcipher-root"
+    },
+    {
+      "name": "nocturne",
+      "purpose": "Offline music player with bit-exact FLAC decode, LRC lyrics and crossfade",
+      "status": "active",
+      "repo": "https://github.com/Sifr-Dev/nocturne",
+      "cipher_version": "pinned via -Dcipher-root"
+    }
+  ]
+}

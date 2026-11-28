@@ -28,8 +28,8 @@ this document does not pretend otherwise.
 ## 1. Build the framework + CLI
 
 ```sh
-git clone https://github.com/Sifr-Dev/Cipher.git sifr-native
-cd sifr-native
+git clone https://github.com/Sifr-Dev/Cipher.git Cipher
+cd Cipher
 zig build          # builds zig-out/bin/{sifr,cipher-hello,cipher}
 ```
 
@@ -56,11 +56,11 @@ cipher doctor: OK — this machine can build and run cipher apps.
 
 ```sh
 cd /wherever/you/keep/projects
-CIPHER_HOME=/path/to/sifr-native /path/to/sifr-native/zig-out/bin/cipher new my-app
+CIPHER_HOME=/path/to/Cipher /path/to/Cipher/zig-out/bin/cipher new my-app
 ```
 
-(or put `sifr-native` next to your projects folder and just run
-`cipher new my-app` — the tool finds a `../sifr-native` sibling automatically,
+(or put `Cipher` next to your projects folder and just run
+`cipher new my-app` — the tool finds a `../Cipher` sibling automatically,
 or use `--cipher PATH`)
 
 Output:
