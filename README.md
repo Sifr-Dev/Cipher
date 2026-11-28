@@ -1,191 +1,171 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/banner-dark.svg">
-    <img alt="cipher — built from zero" src=".github/banner-light.svg" width="100%">
-  </picture>
-</p>
+# Phantom
 
-<div align="center">
-
-# cipher
-
-### A zero-dependency, Vulkan-native Linux UI framework for Zig.
+A zero-dependency, Vulkan-native Linux application framework written from scratch in Zig.
 
 <p>
-  <img alt="Zig" src="https://img.shields.io/badge/ZIG-0.17.1-ffb86b?style=for-the-badge&logo=zig&logoColor=0b0d10&labelColor=1b1f27">
-  <img alt="License MIT" src="https://img.shields.io/badge/LICENSE-MIT-2ea043?style=for-the-badge&labelColor=1b1f27">
-  <img alt="Linux" src="https://img.shields.io/badge/LINUX-x86__64-58a6ff?style=for-the-badge&logo=linux&logoColor=0b0d10&labelColor=1b1f27">
-</p>
-<p>
-  <img alt="Runtime deps" src="https://img.shields.io/badge/RUNTIME_DEPS-0-6ee7ff?style=for-the-badge&labelColor=1b1f27">
-  <img alt="Wayland and Vulkan via dlopen" src="https://img.shields.io/badge/WAYLAND_+_VULKAN-DLOPEN-8957e5?style=for-the-badge&labelColor=1b1f27">
-  <img alt="Tests" src="https://img.shields.io/badge/TESTS-107_PASSING-39c5cf?style=for-the-badge&labelColor=1b1f27">
+  <a href="https://github.com/Sifr-Dev/Phantom/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Sifr-Dev/Phantom/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="Zig 0.17.1" src="https://img.shields.io/badge/ZIG-0.17.1-ffb86b?logo=zig&logoColor=white">
+  <img alt="Tests: 160 passing" src="https://img.shields.io/badge/TESTS-160_PASSING-39c5cf">
+  <img alt="License: MIT" src="https://img.shields.io/badge/LICENSE-MIT-2ea043">
+  <img alt="Linux x86_64" src="https://img.shields.io/badge/LINUX-x86__64-58a6ff?logo=linux&logoColor=white">
 </p>
 
-</div>
+> Repository: `https://github.com/Sifr-Dev/Phantom`. The package name (`.cipher`),
+> build target and CLI binary (`cipher`) are unchanged for compatibility.
 
-> Zero-dependency, Vulkan-native Linux UI framework for Zig. No toolkit, no glue, every byte ours.
+## What it is
 
-A from-zero, zero-dependency native Linux GPU UI framework written in Zig
-0.17.1. No toolkit, no C wrapper, no build-time codegen: `libwayland-client`
-is dlopen'd for the display component (like Vulkan is), an in-tree scanner
-(`tools/gen_wayland_tables.py`) generates the wl_interface tables the C
-library demands, a hand-written immediateness-mode UI rasterizes glyphs to an
-R8 atlas, and a dlopen-bound `libvulkan.so.1` renders the UI and presents it
-straight to the compositor through a `VK_KHR_wayland_surface` swapchain — no
-readback, no wl_shm copy on the GPU path (wl_shm + software raster remains
-the fallback). Everything else is hand-rolled: the TrueType parser, the
-rasterizer, the layout engine, the widgets, the terminal stack, the FLAC
-decoder.
+Phantom is a from-zero native Linux GPU UI framework in Zig 0.17.1. It dlopen()s
+`libwayland-client` and `libvulkan.so.1` instead of linking them, renders an
+immediate-mode UI through a `VK_KHR_wayland_surface` swapchain, and falls back
+to software rasterization over `wl_shm` when no Vulkan ICD is available.
+Everything between the application and those two loaders is in this repository:
+the Wayland interface tables, the Vulkan bindings, the TrueType parser, the
+rasterizer, the layout engine, the widgets, the terminal stack, and the audio
+sink.
 
-## Pipeline
+## Current capabilities
 
-```
-app (immediate-mode UI)
-  → flexbox layout (src/ui/layout.zig)
-  → draw commands: rects + text runs (src/ui/ui.zig)
-  → glyph atlas (src/ui/text/: SFNT parser + scanline AA rasterizer, R8)
-  → GPU quads (src/gpu/vulkan/text.zig: vertex buffer + atlas texture)
-  → swapchain image → vkQueuePresentKHR → compositor vsync (WSI)
-    └─ fallback without a usable ICD: offscreen render pass →
-       vkCmdCopyImageToBuffer → host buffer → memcpy → wl_shm commit
-```
+- **Wayland display session over dlopen()** — `src/os/linux/wayland/wayland_client.zig`,
+  generated interface tables in `src/os/linux/wayland/wayland_tables.zig`; covered
+  by `zig build test` (`WAYLAND_PROTOCOL_OK`, `src/os/linux/wayland/wayland_client.zig`).
+- **Vulkan UI presentation and software fallback** — `src/gpu/vulkan/swapchain.zig`,
+  `src/gpu/vulkan/text.zig`, `src/gpu/vulkan/frame.zig`; exact-pixel tests emit
+  `GPU_FRAME_OK bytes=12288` and `GPU_TEXT_OK bytes=61440` in `zig build test`.
+- **From-zero TrueType engine** — SFNT parser (`src/ui/text/font.zig`), scanline
+  rasterizer (`src/ui/text/raster.zig`), shelf-packed atlas (`src/ui/text/atlas.zig`);
+  `zig build test` reports `TEXT_FONT_OK glyphs=2620 upem=2048` and
+  `TEXT_RASTER_OK` on a real system font.
+- **Immediate-mode flexbox UI and widgets** — `src/ui/layout.zig`, `src/ui/ui.zig`,
+  `src/ui/widgets.zig`; `src/ui/widgets_test.zig` (12 tests) covers tabs, focus,
+  tooltips, menus, scrollbars and text editing.
+- **Terminal stack** — VT parser, grid, kitty keyboard protocol, PTY, server and
+  JSON wire protocol under `src/term/`; exercised by `src/term/term_test.zig` and
+  the e2e tests (`E2E_SPAWN_OK`, `SERVER_CAPTURE_OK` in `zig build test`).
+- **Audio output sink** — `src/audio/sink.zig` with null, WAV-capture, ALSA and
+  Pulse backends loaded through `dlopen`; `src/audio/sink_test.zig` (8 tests)
+  includes a WAV round-trip and clean skips when no audio server is running.
+- **Application framework and CLI** — `src/framework/runtime.zig`,
+  `src/framework/input.zig`, text field/IME model; `cipher new`, `cipher doctor`
+  and the scaffold are documented and exercised in `docs/GETTING_STARTED.md`.
+- **Deterministic snapshot gate** — `zig build snapshot` regenerates the
+  software frame and compares it with `tests/golden/hello.sha256`.
+- **Zero link-time toolkit dependencies** — `ldd` on a built app shows only the
+  C loader/libc; Wayland and Vulkan are resolved at runtime (`src/gpu/vulkan/loader.zig`).
 
-Everything is hand-rolled: the wl_interface tables (tools/gen_wayland_tables.py
-generates them from the system wayland-protocols XML), the Vulkan binding
-(`libvulkan.so.1` via `dlopen`/`dlsym`, hand-written `extern struct`
-definitions), the shaders (GLSL, embedded), the TrueType parser, the
-rasterizer, and the layout engine. The legacy handwritten wire client
-(src/os/linux/wayland/client.zig) is kept for reference only.
-
-## Build / test / run
-
-```sh
-zig build          # builds zig-out/bin/sifr
-zig build test     # runs all unit/integration tests (needs a Vulkan ICD)
-zig build run      # runs against the live Wayland compositor
-```
-
-Requires Zig 0.17.1, a Wayland compositor (`WAYLAND_DISPLAY`,
-`XDG_RUNTIME_DIR`), and a Vulkan ICD for the GPU path (NVIDIA 620.70.06 and
-lavapipe both verified). The default Instrument Sans font and its OFL license
-are compiled into each application; installed fonts are optional overrides.
-
-## Build your own app
-
-Start from the full walkthrough — [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md).
-The short version:
+## Quick start
 
 ```sh
-git clone https://github.com/Sifr-Dev/Cipher.git Cipher
-cd Cipher && zig build && cd ..
-./Cipher/zig-out/bin/cipher doctor                # zig + Wayland + Vulkan + fonts
+git clone https://github.com/Sifr-Dev/Phantom.git Cipher
+cd Cipher
+zig build                      # builds zig-out/bin/cipher and the example apps
+zig build test                 # unit and integration tests
+./zig-out/bin/cipher doctor    # Zig + Wayland + Vulkan + fonts
+```
+
+Build your own app from the parent directory:
+
+```sh
+cd ..
 CIPHER_HOME=$PWD/Cipher ./Cipher/zig-out/bin/cipher new my-app
-cd my-app && zig build run                        # a window; Esc quits
+cd my-app && zig build run     # a window; Esc quits
 ```
 
-The scaffold gives you `src/main.zig` (a panel, a label, a button), a correct
-`build.zig.zon` path dependency on this checkout, and a README. Your binary
-needs nothing at runtime but the system Wayland loader and a Vulkan ICD
-(software fallback included). `apps/hello.zig` is the richer canonical
-example (`zig build run-hello`, Esc quits); the apps below are the full-scale
-ones, each in its own repository.
+Requirements: Zig 0.17.1, a Wayland compositor (`WAYLAND_DISPLAY`,
+`XDG_RUNTIME_DIR`), and a Vulkan ICD for the GPU path. `apps/hello.zig` is the
+canonical small example (`zig build run-hello`).
 
-## Apps built on Cipher
+## Verification
 
-<!-- BEGIN GENERATED APP INDEX -->
-| App | Purpose | Status | Repository | Cipher |
-| --- | --- | --- | --- | --- |
-| [janus](https://github.com/Sifr-Dev/janus) | GPU-native terminal with panes, tabs and themes | active | https://github.com/Sifr-Dev/janus | pinned at fca41d8 |
-| [nebula](https://github.com/Sifr-Dev/nebula) | Multiplexer engine: spawn/split/capture sessions over a unix socket | active | https://github.com/Sifr-Dev/nebula | pinned at fca41d8 |
-| [nocturne](https://github.com/Sifr-Dev/nocturne) | Offline music player with bit-exact FLAC decode, LRC lyrics and crossfade | active | https://github.com/Sifr-Dev/nocturne | pinned at fca41d8 |
-<!-- END GENERATED APP INDEX -->
+Run on this host (Ryzen 7 7435HS, RTX 4060 Laptop, Wayland, Zig 0.17.1):
 
-This index is generated from `apps/manifest.json` by `tools/gen_app_index.py`;
-do not edit the table by hand.
+```sh
+CIPHER_SKIP_PERF_GATE=1 zig build test
+```
 
-## verified evidence (2026-11-17, RTX 4060 Laptop + lavapipe)
+Observed: exit 0, **160 tests passed, 0 failed**, across 20 test executables
+(the machine-dependent VT throughput gate is skipped by `CIPHER_SKIP_PERF_GATE`,
+as in CI). Builds:
 
-- `zig build test` → exit 0 (twice consecutively); `term_shim` 27/27; `audio_shim`
-  covers the output sink (null, WAV-capture round-trip, ALSA/Pulse dlopen probes;
-  real-device test opens Pulse/PipeWire or skips cleanly when none is running).
-- GPU frame pipeline exact pixels: `GPU_FRAME_OK bytes=12288 corner=04060B center=EBB545`
-  (NVIDIA + lavapipe, clean under `VK_LAYER_KHRONOS_validation`), PPM at `/tmp/sifr_frame.ppm`.
-- GPU text exact pixels: `GPU_TEXT_OK bytes=61440 solid=45B5EBFF hole/void=0B0604FF`,
-  PPM at `/tmp/sifr_gpu_text.ppm`.
-- Text engine vs real TTF: `TEXT_FONT_OK glyphs=2620 upem=2048`, cmap `gid_A=36 adv_A=1366`,
-  rasterizer deterministic + symmetric ink, PPM at `/tmp/sifr_text.ppm`.
-- Live compositor (umbriel): `sifr: render path = vulkan-gpu-ui` +
-  `sifr: WAYLAND_PROTOCOL_OK frames=24`, exit 0, on both NVIDIA and lavapipe.
+```sh
+zig build
+zig build -Doptimize=ReleaseSafe
+zig build -Doptimize=ReleaseFast
+```
 
-## Layout
+All three exit 0 on this host. CI runs the same test command twice — once on a
+shared runner without a GPU, once against lavapipe with
+`VK_LAYER_KHRONOS_validation`; GPU-only tests skip honestly when no ICD exists.
+See `.github/workflows/ci.yml`.
+
+## Architecture
 
 ```
-src/root.zig                 app entry: Wayland session + frame loop + UI demo
+src/root.zig                 app entry: Wayland session, frame loop, demo UI
 src/core/types.zig           handles, errors, diagnostics
-src/os/linux/wayland/        dlopen'd libwayland-client wrapper (wayland_client.zig),
-                             generated interface tables (wayland_tables.zig), xkb keymap via dlopen'd libxkbcommon
-src/gpu/vulkan/              dlopen'd libvulkan: device, frame pipeline, text pipeline,
-                             swapchain (WSI), shaders
-src/ui/text/                 SFNT parser (font.zig), rasterizer (raster.zig), atlas (atlas.zig)
-src/ui/                      flexbox layout (layout.zig), immediate-mode widgets (ui.zig)
-docs/ARCHITECTURE.md         module map and data flow
-docs/decision-records/       why things are the way they are (with evidence)
+src/os/linux/wayland/        dlopen'd libwayland-client wrapper + generated tables
+src/gpu/vulkan/              dlopen'd libvulkan: device, pipelines, swapchain, shaders
+src/ui/text/                 SFNT parser, rasterizer, atlas, grapheme/editing
+src/ui/                      flexbox layout, immediate-mode widgets, motion
+src/term/                    VT parser, grid, PTY, kitty keys, server, JSON protocol
+src/audio/                   output sink (null/WAV/ALSA/Pulse) and WAV I/O
+src/framework/               runtime loop, input events, text field and IME model
+apps/                        hello, bench and app examples
+docs/                        getting started, architecture, internals, benchmarks, ADRs
 ```
 
-See `docs/ARCHITECTURE.md` for details and `docs/decision-records/` for the
-decisions and the bug root-cause writeups.
+`docs/ARCHITECTURE.md` has the module map and frame data flow;
+`docs/decision-records/` records the binding, pipeline, text-engine and UI
+decisions with their evidence.
 
-## shown running
+## Ecosystem
 
-built-from-zero apps prove the framework end to end:
+- **Janus** (`Sifr-Dev/janus`) — GPU-native terminal built on this framework.
+- **Nebula** (`Sifr-Dev/nebula`) — terminal multiplexer/engine built on this framework.
+- **Nocturne** (`Sifr-Dev/nocturne`) — offline FLAC player built on this framework.
+- **CipherDesk** (`Sifr-Dev/CipherDesk`) — the earlier combined apps repository.
+  It is **superseded and archived**; its apps now live in the three repositories
+  above, and its remaining documentation is folded into Phantom. CipherDesk is
+  not a separate product and receives no new work.
 
-| app | what | evidence |
-| --- | --- | --- |
-| Janus | GPU-native terminal (tabs, panes, themes, status bar) | live umbriel/NVIDIA: `render path = vulkan-wsi`, exit 0, `WAYLAND_PROTOCOL_OK frames=30/40` |
-| nocturne | offline FLAC music player (from-zero decoder, synced LRC/VORBIS lyrics, crossfade) | live umbriel/NVIDIA: exit 0, frames=41 |
-| cipher-hello | framework smoke app (every widget) | `WAYLAND_PROTOCOL_OK frames=24/120`, exit 0 |
+## Benchmarks
 
-These apps each live in their own repository and consume this framework as a
-pinned dependency — exactly how an app is built on Qt. The framework ships no
-binaries; apps ship themselves.
+The measured comparison with Qt6/GTK4 and with nanoui lives in `docs/BENCH.md`;
+the raw toolkit benches are in the Janus repository's `bench/BENCH.md`. Hardware:
+Ryzen 7 7435HS, RTX 4060 Laptop, Wayland (umbriel), Zig 0.17.1, Linux; 120-frame
+hello window, three 300-frame windows after a 30-frame warm-up, arithmetic
+means. Headline results from that record: startup 0.854–0.999 s (Qt 1.94–1.97 s,
+GTK 2.10 s), heavy-scene CPU 0.030–0.035 ms/frame (Qt 0.925–0.950 ms), and 3
+linked `.so` mappings versus 45 (Qt) and 113 (GTK).
 
-## speed & footprint vs toolkits (2026-11-17)
+Limitations of those numbers: one machine, one compositor, a minimal scene, and
+`render_ms` includes presentation/vsync rather than GPU timestamps. They are not
+a general performance claim and are not extrapolated to other workloads.
 
-minimal hello window, 120 frames, umbriel/NVIDIA — full data in the janus repository's `bench/BENCH.md`:
+## Limitations
 
-| | cipher (ReleaseSafe stripped) | gtk4 | qt6 |
-| --- | --- | --- | --- |
-| linked .so mappings | **3** | 113 | 45 |
-| wall ms (process exec) | **854–999** | 2095–2104 | 1936–1966 |
-| peak RSS | **23.4 MB (software path)** / ~270–325 MB (Vulkan) | ~294 MB | ~39–49 MB |
-| heavy scene (CPU ms/frame) | **0.030–0.035** | not run | 0.925–0.950 |
+- **Accessibility:** no AT-SPI bridge; screen-reader support is not claimed.
+- **IME:** the text-input-v3 session and text field compile and pass unit tests,
+  but a live IME round-trip against a real input method has not been verified.
+- **Text:** no complex-script shaping (HarfBuzz-class); single-line and wrapped
+  Latin editing only.
+- **Widgets:** roughly 15 controls, not thousands; no printing, animation
+  timeline, or theme engine.
+- **Display scaling:** integer HiDPI scale works; the fractional-scale path was
+  blocked by the test compositor and is not verified.
+- **Stability:** no stable ABI or API guarantee; the framework is pre-1.0.
+- **GPU memory:** the Vulkan path's resident memory is dominated by the NVIDIA
+  allocator floor (~270–325 MB in the measured hello window), not by this code.
 
-Cipher is the only one of the three with zero toolkit dependencies; Wayland
-and Vulkan are dlopen'd, never linked — and in software mode nothing is
-needed at all. GPU RSS is dominated by the NVIDIA Vulkan allocator floor,
-not by this framework.
+## Roadmap (NOT IMPLEMENTED)
 
-See **where Qt and GTK still lead** below for the honest ledger.
+- AT-SPI accessibility bridge and screen-reader semantics.
+- Live IME round-trip verification and composition UI.
+- Complex-script text shaping.
+- Fractional-scale protocol support on a compositor that implements it.
+- A broader widget set and a stable public API/ABI.
+- GPU timestamp queries so presentation cost can be reported separately from vsync.
 
-## where Qt and GTK still lead (2026-11-18)
+## License
 
-This framework is young and deliberately narrow. Honest ledger vs Qt6/GTK4:
-
-**Qt/GTK win unconditionally today:** AT-SPI accessibility (screen readers),
-input method editor (IME) integration, text shaping, widget breadth
-(thousands of controls vs our ~15), theming, printing, internationalization,
-tooling, stable ABI/API, and decades of battle-testing. Our HiDPI integer
-scale works; fractional-scale protocol path was blocked by the umbriel
-compositor killing the client on session-object creation (documented).
-**We win today on:** startup (0.854s vs Qt 1.94–1.97s, GTK 2.10s),
-per-frame CPU in our heavy scene (0.030–0.035ms vs Qt 0.925–0.950ms),
-zero toolkit runtime dependencies (3 mappings vs 45/113), and 23.4 MB
-software-shm RSS (vs Qt 38.6–40.4 MB). Software rendering path exists —
-GPU-optional. Nothing here is a universal claim: our wins are measured
-in specific scenes and measured honestly. If you need accessibility,
-IME, or rich widget tooling today, use Qt or GTK; when you need a small,
-fast, self-contained native binary and you control the whole stack,
-Cipher is the pick.
-
-`MIT` — see `LICENSE`. built from zero.
+MIT — see `LICENSE`. Built from zero.

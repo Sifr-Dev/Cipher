@@ -1,20 +1,20 @@
 # Internals — how the competition actually works (source-verified)
 
-_2026-11-19 · every claim below cites a file from a shallow clone of the upstream repo (commit hashes in §10). No code is copied into Cipher; these are mechanisms, licenses observed (MIT / MIT / Apache-2.0). This document exists because readme-level research is not research._
+_2026-11-19 · every claim below cites a file from a shallow clone of the upstream repo (commit hashes in §10). No code is copied into Phantom; these are mechanisms, licenses observed (MIT / MIT / Apache-2.0). This document exists because readme-level research is not research._
 
 Clones (all 2026-11-18/19): `justrach/nanoui @ dd37daa`, `egoist/mygo @ main`, `zed-industries/zed @ main` (tree listing via GitHub API, individual files fetched raw; full clone deliberately avoided).
 
 ## 1. nanoui (Zig) — the architecture, from source
 
-**Runtime packaging trick.** `src/rt.zig`: on macOS the entire backend (windowing, renderer, text, layout, paint) compiles once into `libnanoui-rt.a`; the app root links it, so editing an app's view re-analyzes only the app. An explicit SafeAllocator wraps debug builds. Consequence for us: nothing similar exists in Cipher; worth adopting later for the widget layer (measure first: our app rebuilds are already fast).
+**Runtime packaging trick.** `src/rt.zig`: on macOS the entire backend (windowing, renderer, text, layout, paint) compiles once into `libnanoui-rt.a`; the app root links it, so editing an app's view re-analyzes only the app. An explicit SafeAllocator wraps debug builds. Consequence for us: nothing similar exists in Phantom; worth adopting later for the widget layer (measure first: our app rebuilds are already fast).
 
 **Platform abstraction is compile-time, not dlopen-table-per-OS.** `src/platform.zig`: `switch (os)` selects `linux/`, `windows/`, `android/`, `ios/`, `macOS` modules at comptime; `runFor(seconds)` is the headless time-advance hook used between frames in tests.
 
-**Linux = GTK, dlopen'd, hand-written tables.** `src/linux/gtk.zig` (352 lines) loads `libgtk-4.so.1` (else `libgtk-3.so.0`) plus GLib/GObject/cairo via dlopen/dlsym, declares the whole API as three Zig structs (`Api`, `Api3`, `Api4`) of `*const fn(...)` fields — the exact same *technique* Cipher uses for libwayland-client. It even loads `gtk4-layer-shell` ahead of GTK for layer-surface windows (`LayerShell` struct) — a real `zwlr_layer_shell_v1` client today, behind GTK. `NANOUI_GTK=3` forces the older path.
+**Linux = GTK, dlopen'd, hand-written tables.** `src/linux/gtk.zig` (352 lines) loads `libgtk-4.so.1` (else `libgtk-3.so.0`) plus GLib/GObject/cairo via dlopen/dlsym, declares the whole API as three Zig structs (`Api`, `Api3`, `Api4`) of `*const fn(...)` fields — the exact same *technique* Phantom uses for libwayland-client. It even loads `gtk4-layer-shell` ahead of GTK for layer-surface windows (`LayerShell` struct) — a real `zwlr_layer_shell_v1` client today, behind GTK. `NANOUI_GTK=3` forces the older path.
 
 **How frames are presented on Linux (the part that matters).** The window's content widget is either `GtkGLArea` (GPU) or `GtkDrawingArea` (CPU/cairo) (`src/linux/surface.zig`, `src/linux/surface_gtk4.zig`). The GL path requests **OpenGL 3.0**; if GTK hands back an OpenGL ES context (NVIDIA's EGL does), the renderer is switched to ES by reading `GL_VERSION` at runtime (`src/linux/glarea.zig::start`). There is **no CPU fallback by default** on Linux — `NANOUI_RENDERER=cpu` is the opt-in. So on Linux nanoui is: GTK window → GtkGLArea → GLEW-less hand-loaded GL → their renderer → compositor (via EGL inside GTK). **nanoui has no direct Wayland/Vulkan path on Linux.** Idle CPU = 0 only because nothing ticks when nothing changes.
 
-**Text** is their own TrueType reader/shaper (`src/ui/text_tt.zig`, `src/ui/rich*.zig`, `src/ui/shaper.zig`) with wrap caches (`wrap_cache.zig`), glyph atlas (`atlas_tt.zig`), CJK break rules (`cjk_break.zig`), and composite-glyph support. Sizable but comparable to Cipher's stack (Cipher: SFNT parser + R8 atlas — nanoui has richer shaping: grapheme clusters, bidi? they have `spans` + composite; depth here is theirs, we have parity on the basics only).
+**Text** is their own TrueType reader/shaper (`src/ui/text_tt.zig`, `src/ui/rich*.zig`, `src/ui/shaper.zig`) with wrap caches (`wrap_cache.zig`), glyph atlas (`atlas_tt.zig`), CJK break rules (`cjk_break.zig`), and composite-glyph support. Sizable but comparable to Phantom's stack (Phantom: SFNT parser + R8 atlas — nanoui has richer shaping: grapheme clusters, bidi? they have `spans` + composite; depth here is theirs, we have parity on the basics only).
 
 **Layout is two-pass flexbox** (`src/ui/layout.zig`): `measure` bottom-up sizes from content; `arrange` top-down distributes free space among grow boxes. Widget answers come from the previous frame's layout (widgets read last frame's rects — documented contract, avoids a second layout pass per interaction).
 
@@ -52,7 +52,7 @@ Clones (all 2026-11-18/19): `justrach/nanoui @ dd37daa`, `egoist/mygo @ main`, `
 
 | claim | verification | consequence |
 |---|---|---|
-| no Linux incumbent runs without GTK except us | nanoui/mygo source above | Cipher's zero-GTK path is the moat; keep it |
+| no Linux incumbent runs without GTK except us | nanoui/mygo source above | Phantom's zero-GTK path is the moat; keep it |
 | direct Vulkan present is table stakes *for us*, unknown to them | their GL/EGL paths | our WSI work stands; D1–D4 widen the gap |
 | snapshot testing is proven possible in pure Zig | nanoui testimonial `tester.zig` | D9 is schedulable now |
 | damage-driven redraw is proven hard but tractable | mygo `internal/gpu/damage.go` + gpui absence | D4 needs buffer-age equivalent on our WSI path (swapchain acquire tells us image index; we can track ages) |
@@ -63,16 +63,16 @@ Clones (all 2026-11-18/19): `justrach/nanoui @ dd37daa`, `egoist/mygo @ main`, `
 
 1. **`cipher snapshot` + Tester parity** — model exactly nanoui's `Tester` (same frame fn, scripted input, hand clock, offscreen PNG). Our CPU raster already renders offscreen; wire `ui.uiFrame` into a `test` step — see D9.
 2. **Springs** — implement our own 480 Hz spring with wyhash-keyed entries and 120-frame pruning; reduce-motion aware. No emojis, no copied curve tables.
-3. **hillclimb-style harness** — port the *methodology* (warmup/measure/best-of-N, ±5% noise, jsonl history) to a Cipher bench app; compare against janus scenes first (our own regression gate), then optionally nanoui scenes later with attribution.
+3. **hillclimb-style harness** — port the *methodology* (warmup/measure/best-of-N, ±5% noise, jsonl history) to a Phantom bench app; compare against janus scenes first (our own regression gate), then optionally nanoui scenes later with attribution.
 4. **600-line policy** as review guidance in CONTRIBUTING.md (not enforced in CI yet; nanoui enforces it — consider `zig build lines` after first gallery lands).
 5. **Frame callbacks** — GPUI and we both gate presents on `wl_callback.done`; D1 replaces this with syncobj-timeline acquire on capable compositors (Mutter/KWin) with graceful fallback — uncontested by anyone reviewed here.
 6. **Linux CI via headless Wayland**, not Xvfb, stated explicitly to avoid nanoui's pattern.
-7. **libnanoui-rt.a-style precompiled runtime** — later; measure Cipher's rebuild times first.
+7. **libnanoui-rt.a-style precompiled runtime** — later; measure Phantom's rebuild times first.
 8. **dmabuf interchange** — MyGo only *disables* WebKit's; GPUI doesn't use it; we implement it (D3) and lead.
 
 ## 6. Licensing of influence
 
-nanoui MIT, MyGo MIT, GPUI Apache-2.0. All permit reading and architectural influence with attribution. Cipher will implement its own equivalents (already the case for our text/VT/layout stacks) and keep THIRD_PARTY_NOTICES precise if any file is adapted directly. No verbatim ports.
+nanoui MIT, MyGo MIT, GPUI Apache-2.0. All permit reading and architectural influence with attribution. Phantom will implement its own equivalents (already the case for our text/VT/layout stacks) and keep THIRD_PARTY_NOTICES precise if any file is adapted directly. No verbatim ports.
 
 ## 7. What remains genuinely unknown until we build it
 

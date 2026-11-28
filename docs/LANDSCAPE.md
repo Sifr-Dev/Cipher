@@ -1,11 +1,11 @@
-# Cipher — the landscape, the verdict, the scope
+# Phantom — the landscape, the verdict, the scope
 
 _2026-11-18 · researched with primary sources (each linked) and local measurements · this document is the answer to: “is the current project scoped right, or do we scrap it and build from scratch?”_
 
 ## 0. What this document is
 
-A full-stack audit of every serious competitor to what Cipher wants to be, a
-depth audit of Cipher itself, a verdict on keep-vs-scrap, and the concrete
+A full-stack audit of every serious competitor to what Phantom wants to be, a
+depth audit of Phantom itself, a verdict on keep-vs-scrap, and the concrete
 scope that follows. It contains:
 
 - what was measured locally, on which hardware (RTX 4060 Laptop, Wayland
@@ -14,7 +14,7 @@ scope that follows. It contains:
 - what is *not* measured yet (explicitly marked, not padded);
 - the verdict, the architecture, the roadmap, the kill-criteria.
 
-## 1. Measured facts about Cipher today (local, 2026-11-18)
+## 1. Measured facts about Phantom today (local, 2026-11-18)
 
 | fact | value | method |
 |---|---|---|
@@ -45,7 +45,7 @@ Caveats recorded honestly: no GPU timestamps on this path (their Metal numbers
 are theirs, not ours); encode CPU on the CPU raster is 4–75 ms (that is the real
 cost of the shadow/blend rasterizer in software, not of frame logic); their
 CPU-frame numbers reproduce on our hardware. **Update (2026-11-19):** the
-Cipher harness now exists (see framework/cipher-bench work, docs/BENCH.md) —
+Phantom harness now exists (see framework/cipher-bench work, docs/BENCH.md) —
 CPU phases measured on this host (text 0.166 / boxes 0.146 / dashboard 0.065 ms
 build+layout+encode vs nanoui's 0.374 / 0.238 / 0.104 ms), with the scene
 asymmetries and unmeasured present-path caveats written into BENCH.md. The
@@ -129,7 +129,7 @@ mobile, a Lean proof portfolio, a shipped-apps ecosystem, hillclimb.
 `dlopen`’d `libvulkan.so.1` driving a swapchain to the compositor (WSI);
 a terminal stack (VT + kitty protocol); a FLAC decoder; a wl_shm software
 fallback with pixel-parity. On Linux nanoui still pays GTK+GSK+GL for every
-window; Cipher pays system `libwayland-client` + ICD only.
+window; Phantom pays system `libwayland-client` + ICD only.
 
 ### 2.6 egui (Rust immediate-mode) — https://github.com/emilk/egui
 Immediate-mode, winit+wgpu; excellent for debug UIs/tools; not a desktop-app
@@ -141,7 +141,7 @@ differentiation of everyone in §2.3–2.5 — and ours.
 
 ## 3. Depth audit — how far down does each stack actually go?
 
-| layer | Qt | GTK | GPUI/zed | nanoui | **Cipher** |
+| layer | Qt | GTK | GPUI/zed | nanoui | **Phantom** |
 |---|---|---|---|---|---|
 | window/comp channel | wayland-client (plugin) | GDK→wayland-client | Rust wayland-client | **dlopen’d GTK** → wayland | **dlopen’d libwayland-client, in-tree generated interface tables** |
 | present path | RHI (抽象) → Vulkan/GL | GSK → GL/Vulkan/cairo | blade/Vulkan | **GtkGLArea OpenGL** | **direct `VK_KHR_wayland_surface` swapchain present — zero readback** |
@@ -162,17 +162,17 @@ than implicit sync — adoption is real in 2026 (Mutter 48+, KWin 6.2+) but
 **not required** for correctness; it is the latency/power frontier.
 
 X11 (https://www.x.org/) is effectively in maintenance; XWayland remains the
-bridge — Cipher does not implement X11 as a target (deliberate; wayland-only
+bridge — Phantom does not implement X11 as a target (deliberate; wayland-only
 on Linux, with XWayland for legacy clients as-is).
 
 Metal (https://developer.apple.com/metal/) is Apple’s tightly-integrated API;
-not a Linux target; relevant if/when a macOS backend is attempted — Cipher is
+not a Linux target; relevant if/when a macOS backend is attempted — Phantom is
 Linux-first by design; Metal support is a port, not a rewrite (the renderer
 is small: one text pipeline + solid fill; swapchain equivalent = CAMetalLayer).
 
 ## 4. Verdict: keep. Scrap the framing, not the foundation.
 
-**Cipher should NOT be scrapped.** Reasons, with evidence:
+**Phantom should NOT be scrapped.** Reasons, with evidence:
 
 1. **The hardest, riskiest layers are built and verified**: the hand-rolled
    Wayland client (interface tables verified byte-identical to scanner
@@ -298,8 +298,8 @@ canary scene that fails when a glyph raster changes.
 
 ```
 apps (janus, nocturne, examples/*)        — ship themselves; framework ships none
-  └─ Cipher UI   immediate-mode toolkit     — widgets, theme, motion, a11y hooks, CLI
-       └─ Cipher Core  deep stack           — wayland client, vulkan, VT, text, shm fallback
+  └─ Phantom UI   immediate-mode toolkit     — widgets, theme, motion, a11y hooks, CLI
+       └─ Phantom Core  deep stack           — wayland client, vulkan, VT, text, shm fallback
 ```
 
 Rules that make it a framework, not a demo:

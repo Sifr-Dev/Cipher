@@ -1,5 +1,5 @@
 {
-  "framework": "Cipher",
+  "framework": "Phantom",
   "apps": [
     {
       "name": "janus",

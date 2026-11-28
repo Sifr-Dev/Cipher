@@ -1,6 +1,6 @@
 # Getting started with cipher
 
-One binary, zero install footstep. Cipher apps are single executables that need
+One binary, zero install footstep. Phantom apps are single executables that need
 nothing at runtime but a Wayland session and (for the GPU path) a Vulkan ICD.
 No GTK, no Qt, no Electron, no toolkit of any kind inside the process.
 
@@ -28,7 +28,7 @@ this document does not pretend otherwise.
 ## 1. Build the framework + CLI
 
 ```sh
-git clone https://github.com/Sifr-Dev/Cipher.git Cipher
+git clone https://github.com/Sifr-Dev/Phantom.git Cipher
 cd Cipher
 zig build          # builds zig-out/bin/{sifr,cipher-hello,cipher}
 ```
@@ -140,7 +140,7 @@ readelf -d zig-out/bin/my-app
 ```
 
 On the tested Linux x86_64 configuration, the dynamic dependencies are the
-system C library and ELF loader; there is no separately installed Cipher,
+system C library and ELF loader; there is no separately installed Phantom,
 Zig, Qt or GTK runtime. The compositor, system libraries and applicable GPU
 driver remain platform requirements.
 

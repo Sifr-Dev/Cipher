@@ -17,7 +17,7 @@ const usage =
     \\  cipher doctor                       check zig + Wayland + Vulkan + fonts
     \\  cipher version                      print version
     \\
-    \\Docs: https://github.com/Sifr-Dev/Cipher
+    \\Docs: https://github.com/Sifr-Dev/Phantom
     \\
 ;
 

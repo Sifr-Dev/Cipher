@@ -1,10 +1,10 @@
-# Cipher bench — first same-hardware head-to-head (2026-11-19)
+# Phantom bench — first same-hardware head-to-head (2026-11-19)
 
 _Measured on this host (Ryzen 7 7435HS, RTX 4060 Laptop, Wayland/umbriel,
 Zig 0.17.1, Linux). Nanoui column = the hillclimb binary built from the
 2026-11-18 clone, run unmodified on this host (its `--only nanoui` scenes;
 `hillclimb/README.md` methodology: 30 warmup, 300 frames ×3, lowest median;
-our host-rendered CPU phases). Cipher column = `cipher-bench` (this repo,
+our host-rendered CPU phases). Phantom column = `cipher-bench` (this repo,
 examples/bench), same host, same date, WSI present; per-300-frame window
 arithmetic means, three repeats, warmup 30 frames excluded once per process.
 The harness does not calculate a median or choose the best repeat._
@@ -15,7 +15,7 @@ The harness does not calculate a median or choose the best repeat._
 | boxes (600 moving boxes) | **0.238 ms** | 0.127 + 0.016 = **0.143 ms** | **0.146 ms** | 75.5 ms (CPU raster) |
 | dashboard (12 cards) | **0.104 ms** | 0.055 + 0.007 = **0.062 ms** | **0.065 ms** | 54.0 ms (CPU raster) |
 
-Cipher `render_ms` (WSI): 18.0/11.9/17.1 ms — vsync-wait dominated, **not** GPU
+Phantom `render_ms` (WSI): 18.0/11.9/17.1 ms — vsync-wait dominated, **not** GPU
 time (no timestamps yet). Nanoui GPU column on Linux: 0.000 (no Metal) — their
 CPU-raster numbers above are the comparable ones.
 
@@ -41,7 +41,7 @@ to this scene. No nanoui remeasurement or GPU/CPU superiority claim is made.
 
 ## What this does and does not prove
 
-**Historical comparison:** in the older table, Cipher's CPU-side frame cost
+**Historical comparison:** in the older table, Phantom's CPU-side frame cost
 (view build + flexbox layout + quad construction) is ~2.0–2.3× lower than
 nanoui's on those older scenes, plus ~15–150× lower encode CPU. Their encode
 number is the cost of software Gaussian shadows + blend rasterization; ours is
@@ -54,12 +54,12 @@ a direct quad build. This is not a claim about the remeasured shadowed scene.
 1. **Different work per scene.** Their labels carry real text machinery
    (grapheme clusters, wrap caches, composite glyphs) — ours are single-line
    plain labels. Their boxes include rounded corners and 8-sample Gaussian
-   shadows. The current Cipher boxes scene has rounded rectangles and shadows
+   shadows. The current Phantom boxes scene has rounded rectangles and shadows
    too, but its geometry and shadow filter are not identical to nanoui's. The
    older `0.143 ms` plain-rectangle result must not be presented as the cost of
    the current shadowed scene. See the remeasurement below.
 2. **Feature asymmetry cuts the other way too:** nanoui ships motion, IME,
-   accessibility on Apple, webview, kit components, mobile. Cipher ships a
+   accessibility on Apple, webview, kit components, mobile. Phantom ships a
    terminal, a FLAC decoder, and a 12-widget kit. Neither suite's number
    prices in what the other can't do.
 3. **Warmup is once per process**, shared across scenes if run with the

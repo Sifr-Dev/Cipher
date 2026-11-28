@@ -1,9 +1,15 @@
 {
-  "name": "Cipher",
-  "description": "GPU/UI/terminal/audio application framework (Wayland + Vulkan, dlopen, zero link deps)",
+  "name": "Phantom",
+  "displayName": "Phantom",
+  "former_name": "Cipher",
+  "description": "Zero-dependency, Vulkan-native Linux application framework (Wayland + Vulkan via dlopen, from-zero text/UI/terminal/audio stack)",
+  "summary": "Native graphics and application framework written from scratch in Zig; repository slug, package and CLI remain Cipher/cipher for compatibility.",
   "stack": [
     "zig"
   ],
   "status": "active",
-  "primary_language": "Zig"
+  "primary_language": "Zig",
+  "repository": "https://github.com/Sifr-Dev/Phantom",
+  "license": "MIT",
+  "test_count": 160
 }

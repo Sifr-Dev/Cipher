@@ -200,7 +200,7 @@ pub fn run(alloc: std.mem.Allocator, argv: []const []const u8) !u8 {
     const readme = try std.fmt.allocPrint(alloc,
         \\# {s}
         \\
-        \\An app built with the [cipher](https://github.com/Sifr-Dev/Cipher) framework.
+        \\An app built with the [cipher](https://github.com/Sifr-Dev/Phantom) framework.
         \\
         \\## Run it
         \\
