@@ -96,9 +96,9 @@ ones, each in its own repository.
 <!-- BEGIN GENERATED APP INDEX -->
 | App | Purpose | Status | Repository | Cipher |
 | --- | --- | --- | --- | --- |
-| [janus](https://github.com/Sifr-Dev/janus) | GPU-native terminal with panes, tabs and themes | active | https://github.com/Sifr-Dev/janus | pinned via -Dcipher-root |
-| [nebula](https://github.com/Sifr-Dev/nebula) | Multiplexer engine: spawn/split/capture sessions over a unix socket | active | https://github.com/Sifr-Dev/nebula | pinned via -Dcipher-root |
-| [nocturne](https://github.com/Sifr-Dev/nocturne) | Offline music player with bit-exact FLAC decode, LRC lyrics and crossfade | active | https://github.com/Sifr-Dev/nocturne | pinned via -Dcipher-root |
+| [janus](https://github.com/Sifr-Dev/janus) | GPU-native terminal with panes, tabs and themes | active | https://github.com/Sifr-Dev/janus | pinned at fca41d8 |
+| [nebula](https://github.com/Sifr-Dev/nebula) | Multiplexer engine: spawn/split/capture sessions over a unix socket | active | https://github.com/Sifr-Dev/nebula | pinned at fca41d8 |
+| [nocturne](https://github.com/Sifr-Dev/nocturne) | Offline music player with bit-exact FLAC decode, LRC lyrics and crossfade | active | https://github.com/Sifr-Dev/nocturne | pinned at fca41d8 |
 <!-- END GENERATED APP INDEX -->
 
 This index is generated from `apps/manifest.json` by `tools/gen_app_index.py`;
