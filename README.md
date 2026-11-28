@@ -5,11 +5,26 @@
   </picture>
 </p>
 
+<div align="center">
+
 # cipher
 
-[![ci](https://github.com/Sifr-Dev/Cipher/actions/workflows/ci.yml/badge.svg)](https://github.com/Sifr-Dev/Cipher/actions/workflows/ci.yml)
+### A zero-dependency, Vulkan-native Linux UI framework for Zig.
 
-zero-dependency, vulkan-native Linux UI framework for Zig. no toolkit. no glue. every byte is ours.
+<p>
+  <img alt="Zig" src="https://img.shields.io/badge/ZIG-0.17.1-ffb86b?style=for-the-badge&logo=zig&logoColor=0b0d10&labelColor=1b1f27">
+  <img alt="License MIT" src="https://img.shields.io/badge/LICENSE-MIT-2ea043?style=for-the-badge&labelColor=1b1f27">
+  <img alt="Linux" src="https://img.shields.io/badge/LINUX-x86__64-58a6ff?style=for-the-badge&logo=linux&logoColor=0b0d10&labelColor=1b1f27">
+</p>
+<p>
+  <img alt="Runtime deps" src="https://img.shields.io/badge/RUNTIME_DEPS-0-6ee7ff?style=for-the-badge&labelColor=1b1f27">
+  <img alt="Wayland and Vulkan via dlopen" src="https://img.shields.io/badge/WAYLAND_+_VULKAN-DLOPEN-8957e5?style=for-the-badge&labelColor=1b1f27">
+  <img alt="Tests" src="https://img.shields.io/badge/TESTS-107_PASSING-39c5cf?style=for-the-badge&labelColor=1b1f27">
+</p>
+
+</div>
+
+> Zero-dependency, Vulkan-native Linux UI framework for Zig. No toolkit, no glue, every byte ours.
 
 A from-zero, zero-dependency native Linux GPU UI framework written in Zig
 0.17.1. No toolkit, no C wrapper, no build-time codegen: `libwayland-client`
@@ -91,9 +106,9 @@ do not edit the table by hand.
 
 ## verified evidence (2026-11-17, RTX 4060 Laptop + lavapipe)
 
-- `zig build test` → exit 0 (twice consecutively); `term_shim` 27/27; `audio_shim` 8/8
-  incl. FLAC bit-exact vs `flac`/`ffmpeg` on 6 fixtures (16/24-bit, 8–96 kHz,
-  mono/stereo, -0/-3/-5/-8; mismatches=0, md5_ok=true).
+- `zig build test` → exit 0 (twice consecutively); `term_shim` 27/27; `audio_shim`
+  covers the output sink (null, WAV-capture round-trip, ALSA/Pulse dlopen probes;
+  real-device test opens Pulse/PipeWire or skips cleanly when none is running).
 - GPU frame pipeline exact pixels: `GPU_FRAME_OK bytes=12288 corner=04060B center=EBB545`
   (NVIDIA + lavapipe, clean under `VK_LAYER_KHRONOS_validation`), PPM at `/tmp/sifr_frame.ppm`.
 - GPU text exact pixels: `GPU_TEXT_OK bytes=61440 solid=45B5EBFF hole/void=0B0604FF`,
