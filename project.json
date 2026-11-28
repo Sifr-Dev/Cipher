@@ -1,0 +1,9 @@
+{
+  "name": "Cipher",
+  "description": "GPU/UI/terminal/audio application framework (Wayland + Vulkan, dlopen, zero link deps)",
+  "stack": [
+    "zig"
+  ],
+  "status": "active",
+  "primary_language": "Zig"
+}
